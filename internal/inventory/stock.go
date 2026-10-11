@@ -7,8 +7,17 @@ import (
 )
 
 func (s *Service) Stock(ctx context.Context, a Actor, id int64) (Stock, error) {
+	return s.stock(ctx, a, id, true)
+}
+func (s *Service) StockSummary(ctx context.Context, a Actor, id int64) (Stock, error) {
+	return s.stock(ctx, a, id, false)
+}
+func (s *Service) stock(ctx context.Context, a Actor, id int64, history bool) (Stock, error) {
 	out := Stock{Balances: []Balance{}, History: []Movement{}}
-	if _, e := s.Item(ctx, a, id); e != nil {
+	if e := s.authorize(ctx, a, "stock:read"); e != nil {
+		return out, e
+	}
+	if e := s.itemExists(ctx, id); e != nil {
 		return out, e
 	}
 	// A read transaction keeps balances and history from different concurrent writes from mixing.
@@ -35,13 +44,17 @@ func (s *Service) Stock(ctx context.Context, a Actor, id int64) (Stock, error) {
 	if e != nil {
 		return out, e
 	}
-	rows, e = tx.QueryContext(ctx, `SELECT id,item_id,location_id,quantity/1000000.0,reason,transfer_id,actor_id,created_at FROM stock_movements WHERE item_id=? ORDER BY id DESC`, id)
+	if !history {
+		out.Total = math.Round(out.Total*1e6) / 1e6
+		return out, tx.Commit()
+	}
+	rows, e = tx.QueryContext(ctx, `SELECT id,item_id,location_id,quantity/1000000.0,reason,transfer_id,actor_id,created_at,token_id FROM stock_movements WHERE item_id=? ORDER BY id DESC`, id)
 	if e != nil {
 		return out, e
 	}
 	for rows.Next() {
 		var m Movement
-		if e = rows.Scan(&m.ID, &m.ItemID, &m.LocationID, &m.Quantity, &m.Reason, &m.TransferID, &m.ActorID, &m.CreatedAt); e != nil {
+		if e = rows.Scan(&m.ID, &m.ItemID, &m.LocationID, &m.Quantity, &m.Reason, &m.TransferID, &m.ActorID, &m.CreatedAt, &m.TokenID); e != nil {
 			rows.Close()
 			return out, e
 		}
@@ -85,14 +98,18 @@ func balance(ctx context.Context, tx *sql.Tx, item, location int64) (int64, erro
 }
 func movement(ctx context.Context, tx *sql.Tx, a Actor, item, location int64, q float64, reason string, transfer *string, at string) (Movement, error) {
 	m := Movement{ItemID: item, LocationID: location, Quantity: float64(int64(math.Round(q*1e6))) / 1e6, Reason: reason, TransferID: transfer, ActorID: a.UserID, CreatedAt: at}
-	r, e := tx.ExecContext(ctx, `INSERT INTO stock_movements(item_id,location_id,quantity,reason,transfer_id,actor_id,created_at) VALUES(?,?,?,?,?,?,?)`, item, location, int64(math.Round(q*1e6)), reason, transfer, a.UserID, at)
+	if a.TokenID != 0 {
+		id := a.TokenID
+		m.TokenID = &id
+	}
+	r, e := tx.ExecContext(ctx, `INSERT INTO stock_movements(item_id,location_id,quantity,reason,transfer_id,actor_id,created_at,token_id) VALUES(?,?,?,?,?,?,?,?)`, item, location, int64(math.Round(q*1e6)), reason, transfer, a.UserID, at, tokenID(a))
 	if e == nil {
 		m.ID, e = r.LastInsertId()
 	}
 	return m, e
 }
 func (s *Service) AdjustStock(ctx context.Context, a Actor, id int64, in Adjustment) (Movement, error) {
-	if e := s.authorize(ctx, a, "write"); e != nil {
+	if e := s.authorize(ctx, a, "stock:write"); e != nil {
 		return Movement{}, e
 	}
 	in.Reason = clean(in.Reason)
@@ -135,7 +152,7 @@ func (s *Service) AdjustStock(ctx context.Context, a Actor, id int64, in Adjustm
 	return m, tx.Commit()
 }
 func (s *Service) MoveStock(ctx context.Context, a Actor, id int64, in Transfer) ([]Movement, error) {
-	if e := s.authorize(ctx, a, "write"); e != nil {
+	if e := s.authorize(ctx, a, "stock:write"); e != nil {
 		return nil, e
 	}
 	in.Reason = clean(in.Reason)

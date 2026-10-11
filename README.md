@@ -79,7 +79,10 @@ cmd/server/             configuration, bootstrap and HTTP lifecycle
 internal/inventory/     domain types, authorization, validation, SQLite services
   schema.sql            original embedded version-1 migration
   migration2.sql        user theme and shared default location
+  migration3.sql        hashed agent tokens and token audit attribution
   *_test.go             domain and persistence tests
+internal/mcpserver/     optional MCP adapter over REST, using the official Go SDK
+cmd/mcp/                stdio or Streamable HTTP adapter lifecycle
 internal/web/           REST and HTML adapters over the same services
   templates.html        embedded, escaped HTML templates
   style.css             embedded stylesheet; no JavaScript
@@ -88,8 +91,9 @@ internal/web/           REST and HTML adapters over the same services
 `inventory.Service` owns the database and document directory. Both transports call
 its methods with a trusted authenticated `Actor` and a context. Handlers decode
 inputs and render outputs; authorization, stock invariants, hierarchy validation,
-metadata validation and persistence are in the service. No repository abstraction
-or process-to-process communication is involved.
+metadata validation and persistence are in the service. The core remains one
+process without a repository abstraction. The optional MCP process communicates
+only through the authenticated REST API.
 
 Schema migrations are transactional and recorded in `schema_migrations`.
 Migrations are embedded in the executable and applied in order on startup.
@@ -203,8 +207,9 @@ Search parameters:
 - `limit`: 1–1000, default 100; `offset`: nonnegative, default 0. Ordered by item
   name then ID. Continue until a page contains fewer than `limit` items.
 
-API authentication uses `Authorization: Bearer <session-token>` from `/login`.
-This is an expiring **user session**, not a long-lived scoped API token. Browser
+API authentication accepts `Authorization: Bearer <session-token>` from `/login`
+or a scoped `inv_...` agent token created by an admin (see MCP/agent access below).
+Agent tokens cannot be used as browser sessions. Browser
 sessions use HttpOnly SameSite=Strict cookies. Cookie-authenticated mutations
 must provide `X-CSRF-Token` from the login response (HTML forms include it
 already). Cross-origin mutations are rejected. Do not expose session tokens in
@@ -289,29 +294,249 @@ They use temporary directories and in-process HTTP tests; no external service or
 live database is required. On a system with a C compiler, `go test -race ./...`
 adds Go's race detector (the ordinary build itself does not require C).
 
+## MCP and agent access
+
+MCP is an **optional separate executable**. The normal application works without
+it. The adapter calls the existing REST API, never SQLite, so human UI, REST and
+MCP all use the same domain validation and stock transactions. There is still
+only one process owning the data directory.
+
+The maintained [official Go MCP SDK v1.8.0](https://github.com/modelcontextprotocol/go-sdk/releases/tag/v1.8.0)
+handles protocol negotiation, schemas, resources and transports, including stable
+revision `2026-07-28` and compatible earlier revisions. The SDK is the only new
+direct dependency for this interface; its transitive dependencies are pinned.
+
+### Build, tokens and launch
+
+```sh
+go build -o bin/inventrospect ./cmd/server
+go build -o bin/inventrospect-mcp ./cmd/mcp
+./bin/inventrospect -data ./data
+```
+
+On upgrade, stop the old application, back up the data directory, and start the
+new binary. Migration 3 adds token records and nullable token IDs on audit events
+and stock history; existing inventory and human sessions are preserved.
+
+Sign in as an admin and open **Agent tokens** (`/tokens`). Choose a name, active
+acting user, scopes and optional RFC3339 expiry. Copy the secret immediately: it
+is displayed only on creation. Later views show metadata, scopes, prefix, expiry,
+last use and revocation status, never the secret or hash. Revoke it from this page
+when no longer needed. Prefer a dedicated editor/viewer user for each integration.
+Tokens contain 256 random bits, are stored as SHA256 hashes and are valid until
+revoked or expired (no expiry is permitted). Disabling the owner blocks access;
+role demotion removes write access. Revocation is checked on every API request
+and service authorization, including already-connected MCP clients.
+
+| Scope | Capability |
+| --- | --- |
+| `inventory:read` | Search, item fields/attributes and aggregate quantity, categories/locations, export |
+| `inventory:write` | Create, fully replace or archive items, including bulk item operations |
+| `stock:read` | Per-location balances and stock history |
+| `stock:write` | Adjust, move or initialize stock, including bulk adjustments |
+| `documents:read` | Document metadata and actual file content |
+| `documents:write` | Attach supplied files |
+
+Scopes are independent and also bounded by the owner’s current role. A write
+scope permits its mutation response but does not grant separate read tools. No
+agent scope grants user/token management, settings changes, hierarchy mutations
+or hard deletion. Agents do not use human login sessions. A read-only agent
+usually needs all three `:read` scopes.
+
+**Stdio:** keep the application running, then let the MCP client launch:
+
+```sh
+# Set this in the client environment or a protected launcher, not as a CLI argument.
+read -rs -p 'Agent token: ' INVENTROSPECT_API_TOKEN
+export INVENTROSPECT_API_TOKEN
+./bin/inventrospect-mcp -base-url http://127.0.0.1:8080
+```
+
+Stdout carries MCP only; diagnostics use stderr. The adapter has no data-directory
+argument and will fail startup if its agent credential is invalid.
+
+Common generic MCP client configuration (replace the path and secret; protect
+configuration files that contain credentials):
+
+```json
+{
+  "mcpServers": {
+    "inventory": {
+      "command": "/absolute/path/bin/inventrospect-mcp",
+      "args": ["-base-url", "http://127.0.0.1:8080"],
+      "env": {"INVENTROSPECT_API_TOKEN": "inv_<one-time-secret>"}
+    }
+  }
+}
+```
+
+**Streamable HTTP:** alternatively run a standalone adapter listener:
+
+```sh
+./bin/inventrospect-mcp -base-url http://127.0.0.1:8080 -addr 127.0.0.1:8081
+```
+
+Connect a client to `http://127.0.0.1:8081/mcp` with
+`Authorization: Bearer inv_<one-time-secret>`. This mode ignores the process
+environment token: every request supplies its own credential. It is stateless
+and uses JSON responses; no credential is shared between clients. Origin and
+localhost/DNS-rebinding protection are enabled, and HTTP responses are not cached.
+Clients requiring OAuth discovery rather than configurable bearer headers should
+use stdio instead; OAuth/SSO is deliberately not implemented. The application
+server itself does not gain an `/mcp` endpoint. Do not confuse its port with the
+optional adapter’s port.
+
+### Tools and resources
+
+| Tool | Purpose |
+| --- | --- |
+| `inventory_search` | Compact search results; defaults to 50, maximum 100, with `next_offset` |
+| `inventory_get_item` | Item fields/attributes/category; balances and first 20 document metadata records where scopes allow |
+| `inventory_list_categories` | Hierarchy page with IDs, parents and paths |
+| `inventory_list_locations` | Location hierarchy page |
+| `inventory_get_stock` | Current total and per-location quantities, without history |
+| `inventory_get_stock_history` | Newest-first history; default 50/max 200, continue using `next_before_id` |
+| `document_list` | Paginated metadata; no file bytes |
+| `document_get` | Actual binary document; `metadata_only=true` returns a resource link instead |
+| `inventory_create_item` | Create `{ "item": {...}, "initial_stock": {...} }`; stock is optional |
+| `inventory_update_item` | Full replacement `{ "id": 123, "item": {...} }`; omitted fields clear/reset |
+| `inventory_archive_item` | Set `{ "id": 123, "archived": true }`; false restores |
+| `inventory_adjust_stock` | Signed whole-number delta at explicit item/location |
+| `inventory_move_stock` | Atomic debit/credit transfer between explicit locations |
+| `document_attach` | Attach supplied `content_base64`, filename, type and optional metadata |
+| `inventory_create_items_bulk` | 1–100 creation commands in `records` |
+| `inventory_update_items_bulk` | 1–100 full replacements in `records` |
+| `inventory_adjust_stock_bulk` | 1–100 `{ "item_id": ..., "adjustment": {...} }` commands |
+
+Tool schemas/descriptions include permissions and mutation semantics. Unknown
+fields, missing required fields and wrong input types are rejected by the SDK.
+Domain failures return `isError` with a structured `error.code` and `error.message`.
+Invalid protocol calls/schema errors use SDK protocol errors. An item response
+reports `omitted_scopes` if its optional balances or documents cannot be read.
+`inventory:read` still includes the item’s existing aggregate quantity.
+Hierarchy/document listing pages default to 50, maximum 100; those lists are
+paged in the adapter after fetching metadata from REST. Item search and stock
+history pagination are performed by SQLite.
+
+Resource templates (discover with `resources/templates/list`, read with an explicit URI):
+
+- `inventory://items/{id}` — item details and permitted related metadata.
+- `inventory://items/{id}/documents` — first 100 document metadata records; use
+  `document_list` to continue beyond that page.
+- `inventory://documents/{id}` — actual stored bytes.
+- `inventory://locations/{id}` — ID, parent and hierarchical path.
+
+There is no unbounded enumeration of every resource; `resources/list` is empty.
+Resource caching hints are private and immediately stale. Resource URIs accept
+only positive IDs, never local paths, arbitrary URLs or SQL.
+
+### Datasheets and other files
+
+`document_get` returns the stored file as an MCP embedded resource with MIME type
+and binary `blob`; the SDK base64-encodes the bytes on the wire. The same bytes are
+available through `resources/read`. Ordinary item/search results never contain
+file bytes. SHA256, size, original filename and provenance remain metadata.
+Uploads accept standard base64 in `content_base64`; source URLs are stored only,
+never fetched. The existing 25 MiB file limit still applies.
+
+A client must support binary resource content and decide how to inspect a PDF.
+Some clients cannot feed PDFs to their model or have message limits smaller than
+a 25 MiB file (about 33.4 MiB base64). In that case use metadata-only/resource
+links or the authenticated streaming REST download. This adapter does not extract
+text, chunk files, interpret datasheets or make engineering recommendations.
+MCP input frames are capped at 36 MiB and backend responses at 40 MiB.
+
+Example agent workflows (language interpretation happens in the external client):
+
+- “Find all MOSFETs I have in stock.” → `inventory_search` with
+  `{ "query": "MOSFET", "stock": "in", "limit": 50 }`.
+- “Show me the datasheets for item 123.” → `document_list` with `{ "id": 123 }`,
+  then `document_get` with the chosen **document** ID, or read its resource URI.
+- “Add 10 units of item 123 to location 7.” → `inventory_adjust_stock` with
+  `{ "id": 123, "location_id": 7, "quantity": 10 }`.
+- “Move 3 units of item 123 from location 7 to location 12.” →
+  `inventory_move_stock` with `{ "id": 123, "from_location_id": 7,
+  "to_location_id": 12, "quantity": 3 }`.
+
+### REST additions and bulk semantics
+
+These capabilities work independently of MCP with the same bearer token:
+
+| Method | `/api/v1` path | Payload/purpose |
+| --- | --- | --- |
+| GET | `/agent/me` | Validate an agent token; return user/token IDs and scopes |
+| GET, POST | `/tokens` | Human admin list/create (`name`, `user_id`, `scopes`, optional `expires_at`) |
+| POST | `/tokens/{id}/revoke` | Human admin revoke |
+| GET | `/items/{id}/stock-summary` | Balances without loading history |
+| GET | `/items/{id}/stock-history?limit=50&before_id=456` | Cursor history |
+| POST | `/bulk/items/create` | `{ "records": [{ "item": { "name": "Bearing" } }] }` |
+| POST | `/bulk/items/update` | `{ "records": [{ "id": 123, "item": { "name": "Bearing" } }] }` |
+| POST | `/bulk/stock/adjustments` | `{ "records": [{ "item_id": 123, "adjustment": { "location_id": 7, "quantity": 10 } }] }` |
+
+Bulk requests accept 1–100 records. The whole envelope must parse/validate before
+processing; unknown fields or malformed JSON reject it without changes. Business
+validation is per record. **Each record commits independently in input order**;
+failed records roll back, successful records remain committed. Responses contain
+indexed `results` with either `data` or `error`, plus `succeeded`, `failed` and a
+semantics explanation. This is not a whole-batch transaction. Inspect every result
+and retry only failed records after fixing them. Duplicate IDs in a batch are
+processed sequentially. Stock history records token IDs as well as acting users.
+Creates, stock operations and uploads are not idempotent. Following an uncertain
+network response, inspect state before retrying; exactly-once import/retry
+guarantees and idempotency keys are deferred. JSON REST bodies retain a 1 MiB cap,
+so split batches with unusually large notes/attributes into smaller requests.
+
+### Manual testing and security
+
+With Node/npm available, the official [MCP Inspector](https://github.com/modelcontextprotocol/inspector/blob/main/clients/cli/README.md)
+can launch the stdio adapter. Export `INVENTROSPECT_API_TOKEN` first:
+
+```sh
+npx @modelcontextprotocol/inspector --cli ./bin/inventrospect-mcp --method tools/list
+npx @modelcontextprotocol/inspector --cli ./bin/inventrospect-mcp \
+  --method tools/call --tool-name inventory_search --tool-arg query=MOSFET
+```
+
+Or launch the Inspector UI, choose Streamable HTTP and configure the adapter URL
+and Authorization header. Inspector is a development client, not an application
+dependency; its optional Node installation is separate from the Go build.
+
+```sh
+go test ./...
+go test ./internal/mcpserver -count=1
+go vet ./...
+go build -o bin/inventrospect ./cmd/server
+go build -o bin/inventrospect-mcp ./cmd/mcp
+# Optional real subprocess check; creates a temporary API listener and data directory:
+INVENTROSPECT_MCP_TEST_BINARY="$PWD/bin/inventrospect-mcp" \
+  go test ./internal/mcpserver -run TestStdioBinary -count=1 -v
+```
+
+Normal tests exercise MCP via the SDK client, in-memory transports and the HTTP
+handler without opening sockets. They cover binary bytes, scopes, revocation,
+bulk failures, malformed requests, resource path rejection and no hard-delete
+tools, alongside the original human application suite. The optional subprocess
+test additionally checks the built stdio executable.
+
+Keep both listeners on loopback unless remote access is needed. For remote use,
+protect both the MCP endpoint and its upstream REST connection with HTTPS and
+retain Host/Origin protection. This implements manually provisioned bearer
+credentials, not OAuth discovery. Protect client config/environment and backups;
+never paste a token into an agent conversation. Requests do not accept credentials
+in query parameters. Documents/notes are untrusted data, not agent instructions.
+There is no local-file read, shell, arbitrary SQL or arbitrary URL-fetch tool.
+
 ## Boundaries and next session
 
-This v0 intentionally has no MCP, AI, external retrieval/integrations, procurement,
-suppliers, BOMs, dashboards, deployment automation or proposal system. It also
-has no CSV import, long-lived API tokens, document extraction/preview, custom
-attribute search, full-text ranking, bulk endpoints, password-reset workflow or
-optimistic concurrency control. Stock history is currently returned in full;
-large histories would benefit from cursor pagination. No known failing core
-workflow remains in the automated suite, but it is not a security audit or a
-production load test.
+The application has no autonomous AI, external retrieval/integrations, procurement,
+suppliers, BOMs, dashboards, deployment automation or proposal system. CSV import,
+document extraction/preview, custom-attribute filtering, full-text ranking,
+password reset, OAuth discovery and optimistic concurrency remain outside this
+session. The original UI still displays complete stock history; MCP uses the
+new pageable endpoint. No known failing workflow remains in the test suite, but
+these checks are not a security audit or production load test.
 
-Future MCP can wrap the existing service methods or REST resources. In either
-case it should reuse the same validation/authorization and actor IDs, not write
-SQL. `Actor.Scopes` provides a deny-by-default restriction when populated, in
-addition to live user roles; a future token authenticator can supply allowed
-read/write/admin capabilities (write clients also need read for returned records).
-Tokens must be minted and verified by a trusted authentication adapter, never
-accepted as caller-supplied Actor fields. Documents have stable metadata/content
-resources, and stock operations already have explicit inputs and immutable
-attribution. A later proposal workflow can validate and stage these same command
-inputs before dispatching them with an approved actor; no separate mutation
-rules are needed.
-
-Suggested next session: add scoped, revocable API tokens, idempotency keys for
-stock/document mutations, and stale-edit protection, with contract tests. Those
-are concrete foundations for safe agent use before implementing an MCP adapter.
+Suggested next session: idempotency keys for stock/document/create operations
+and stale-edit protection, with retry/conflict tests. A later approval mechanism
+can stage these same explicit commands before dispatching through the existing
+services, without changing the deterministic inventory rules.

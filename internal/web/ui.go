@@ -104,6 +104,38 @@ func (s *Server) uiRequest(w http.ResponseWriter, r *http.Request, a inventory.A
 				http.Redirect(w, r, itemURL(id), 303)
 				return nil
 			}
+		case "tokens":
+			if len(parts) == 3 && parts[2] == "revoke" {
+				id, err := idValue(parts[1])
+				if err != nil {
+					return err
+				}
+				if err = s.service.RevokeToken(ctx, a, id); err != nil {
+					return err
+				}
+				http.Redirect(w, r, "/tokens", 303)
+				return nil
+			}
+			if len(parts) != 1 {
+				return inventory.ErrNotFound
+			}
+			owner, err := idValue(r.FormValue("user_id"))
+			if err != nil {
+				return err
+			}
+			in := inventory.TokenInput{Name: r.FormValue("name"), UserID: owner, Scopes: r.Form["scopes"]}
+			if expiry := strings.TrimSpace(r.FormValue("expires_at")); expiry != "" {
+				in.ExpiresAt = &expiry
+			}
+			created, err := s.service.CreateToken(ctx, a, in)
+			if err != nil {
+				return err
+			}
+			data["View"] = "token_created"
+			data["Title"] = "Agent token created"
+			data["CreatedToken"] = created
+			s.render(w, r, 201, data)
+			return nil
 		case "settings":
 			if len(parts) != 1 {
 				return inventory.ErrNotFound
@@ -192,6 +224,21 @@ func (s *Server) uiRequest(w http.ResponseWriter, r *http.Request, a inventory.A
 	}
 	data["DefaultLocationID"] = settings.DefaultLocationID
 	switch parts[0] {
+	case "tokens":
+		if len(parts) != 1 {
+			return inventory.ErrNotFound
+		}
+		data["View"] = "tokens"
+		data["Title"] = "Agent/API tokens"
+		data["Tokens"], e = s.service.Tokens(ctx, a)
+		if e != nil {
+			return e
+		}
+		data["Users"], e = s.service.Users(ctx, a)
+		if e != nil {
+			return e
+		}
+		data["Scopes"] = inventory.TokenScopes
 	case "settings":
 		if len(parts) != 1 {
 			return inventory.ErrNotFound

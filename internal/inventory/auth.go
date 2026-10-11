@@ -86,6 +86,9 @@ func (s *Service) Login(ctx context.Context, username, password string) (string,
 	return token, e
 }
 func (s *Service) Authenticate(ctx context.Context, token string) (Actor, error) {
+	if strings.HasPrefix(token, "inv_") {
+		return s.AuthenticateToken(ctx, token)
+	}
 	var a Actor
 	e := s.db.QueryRowContext(ctx, `SELECT s.user_id FROM sessions s JOIN users u ON u.id=s.user_id WHERE token_hash=? AND expires_at>? AND u.disabled=0`, tokenHash(token), time.Now().UTC().Format(time.RFC3339)).Scan(&a.UserID)
 	if e == sql.ErrNoRows {

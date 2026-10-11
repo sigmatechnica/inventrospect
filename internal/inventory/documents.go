@@ -24,7 +24,10 @@ func scanDocument(row scanner) (Document, error) {
 	return d, e
 }
 func (s *Service) Documents(ctx context.Context, a Actor, id int64) ([]Document, error) {
-	if _, e := s.Item(ctx, a, id); e != nil {
+	if e := s.authorize(ctx, a, "documents:read"); e != nil {
+		return nil, e
+	}
+	if e := s.itemExists(ctx, id); e != nil {
 		return nil, e
 	}
 	rows, e := s.db.QueryContext(ctx, "SELECT "+documentColumns+" FROM documents WHERE item_id=? ORDER BY id DESC", id)
@@ -43,7 +46,7 @@ func (s *Service) Documents(ctx context.Context, a Actor, id int64) ([]Document,
 	return out, rows.Err()
 }
 func (s *Service) Document(ctx context.Context, a Actor, id int64) (Document, error) {
-	if e := s.authorize(ctx, a, "read"); e != nil {
+	if e := s.authorize(ctx, a, "documents:read"); e != nil {
 		return Document{}, e
 	}
 	return scanDocument(s.db.QueryRowContext(ctx, "SELECT "+documentColumns+" FROM documents WHERE id=?", id))
@@ -57,10 +60,10 @@ func (s *Service) DocumentContent(ctx context.Context, a Actor, id int64) (Docum
 	return d, f, e
 }
 func (s *Service) AttachDocument(ctx context.Context, a Actor, id int64, d Document, r io.Reader) (Document, error) {
-	if e := s.authorize(ctx, a, "write"); e != nil {
+	if e := s.authorize(ctx, a, "documents:write"); e != nil {
 		return d, e
 	}
-	if _, e := s.Item(ctx, a, id); e != nil {
+	if e := s.itemExists(ctx, id); e != nil {
 		return d, e
 	}
 	d, e := s.prepareDocument(a, d, r)

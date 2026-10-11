@@ -16,11 +16,18 @@ type DocumentUpload struct {
 // CreateItem saves the item, initial ledger entry and document metadata atomically.
 // On failure, newly prepared files are removed; no partial item is left behind.
 func (s *Service) CreateItem(ctx context.Context, a Actor, i Item, initial Adjustment, uploads []DocumentUpload) (Item, error) {
-	if e := s.authorize(ctx, a, "write"); e != nil {
+	if e := s.authorize(ctx, a, "inventory:write"); e != nil {
 		return Item{}, e
 	}
-	if e := s.authorize(ctx, a, "read"); e != nil {
-		return Item{}, e
+	if initial.Quantity != 0 {
+		if e := s.authorize(ctx, a, "stock:write"); e != nil {
+			return Item{}, e
+		}
+	}
+	if len(uploads) > 0 {
+		if e := s.authorize(ctx, a, "documents:write"); e != nil {
+			return Item{}, e
+		}
 	}
 	if i.ID != 0 {
 		return Item{}, invalid("A new item must not have an ID")
@@ -102,5 +109,5 @@ func (s *Service) CreateItem(ctx context.Context, a Actor, i Item, initial Adjus
 		return Item{}, e
 	}
 	committed = true
-	return s.Item(ctx, a, i.ID)
+	return s.itemRecord(ctx, i.ID)
 }

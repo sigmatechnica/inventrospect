@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -20,6 +21,9 @@ var schema string
 
 //go:embed migration2.sql
 var migration2 string
+
+//go:embed migration3.sql
+var migration3 string
 
 type Service struct {
 	db      *sql.DB
@@ -50,7 +54,7 @@ func Open(dataDir string) (*Service, error) {
 		db.Close()
 		return nil, err
 	}
-	migrations := []string{schema, migration2}
+	migrations := []string{schema, migration2, migration3}
 	if version > len(migrations) {
 		db.Close()
 		return nil, errors.New("database schema is newer than this executable")
@@ -102,12 +106,28 @@ func (s *Service) authorize(ctx context.Context, a Actor, scope string) error {
 	if scope == "admin" && role != "admin" {
 		return ErrForbidden
 	}
-	if scope == "write" && role == "viewer" {
+	if (scope == "write" || strings.HasSuffix(scope, ":write")) && role == "viewer" {
 		return ErrForbidden
+	}
+	if a.TokenID != 0 {
+		var raw string
+		e := s.db.QueryRowContext(ctx, `SELECT scopes FROM api_tokens WHERE id=? AND user_id=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)`, a.TokenID, a.UserID, time.Now().UTC().Format(time.RFC3339)).Scan(&raw)
+		if e == sql.ErrNoRows {
+			return ErrAuth
+		}
+		if e != nil {
+			return e
+		}
+		if e = json.Unmarshal([]byte(raw), &a.Scopes); e != nil {
+			return e
+		}
+		if len(a.Scopes) == 0 {
+			return ErrForbidden
+		}
 	}
 	if a.Scopes != nil {
 		for _, v := range a.Scopes {
-			if v == scope {
+			if v == scope || (a.TokenID == 0 && ((v == "read" && strings.HasSuffix(scope, ":read")) || (v == "write" && strings.HasSuffix(scope, ":write")))) {
 				return nil
 			}
 		}
@@ -124,7 +144,7 @@ func (s *Service) CurrentUser(ctx context.Context, a Actor) (User, error) {
 	return u, e
 }
 func audit(ctx context.Context, tx *sql.Tx, a Actor, action, resource string, id int64) error {
-	_, e := tx.ExecContext(ctx, `INSERT INTO audit_events(actor_id,action,resource,resource_id,created_at) VALUES(?,?,?,?,?)`, a.UserID, action, resource, id, now())
+	_, e := tx.ExecContext(ctx, `INSERT INTO audit_events(actor_id,action,resource,resource_id,created_at,token_id) VALUES(?,?,?,?,?,?)`, a.UserID, action, resource, id, now(), tokenID(a))
 	return e
 }
 func clean(s string) string { return strings.TrimSpace(s) }
@@ -135,4 +155,16 @@ func exists(ctx context.Context, tx *sql.Tx, table string, id int64) error {
 		return invalid("Unknown %s ID", table)
 	}
 	return e
+}
+
+func (s *Service) itemExists(ctx context.Context, id int64) error {
+	var found int
+	e := s.db.QueryRowContext(ctx, `SELECT 1 FROM items WHERE id=?`, id).Scan(&found)
+	if e == sql.ErrNoRows {
+		return ErrNotFound
+	}
+	return e
+}
+func (s *Service) itemRecord(ctx context.Context, id int64) (Item, error) {
+	return scanItem(s.db.QueryRowContext(ctx, "SELECT "+itemColumns+" FROM items i WHERE i.id=?", id))
 }

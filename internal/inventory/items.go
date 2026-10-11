@@ -28,13 +28,13 @@ func scanItem(row scanner) (Item, error) {
 	return i, e
 }
 func (s *Service) Item(ctx context.Context, a Actor, id int64) (Item, error) {
-	if e := s.authorize(ctx, a, "read"); e != nil {
+	if e := s.authorize(ctx, a, "inventory:read"); e != nil {
 		return Item{}, e
 	}
 	return scanItem(s.db.QueryRowContext(ctx, "SELECT "+itemColumns+" FROM items i WHERE i.id=?", id))
 }
 func (s *Service) Search(ctx context.Context, a Actor, f Search) ([]Item, error) {
-	if e := s.authorize(ctx, a, "read"); e != nil {
+	if e := s.authorize(ctx, a, "inventory:read"); e != nil {
 		return nil, e
 	}
 	if f.Limit == 0 {
@@ -106,7 +106,7 @@ func (s *Service) Search(ctx context.Context, a Actor, f Search) ([]Item, error)
 	return out, rows.Err()
 }
 func (s *Service) SaveItem(ctx context.Context, a Actor, i Item) (Item, error) {
-	if e := s.authorize(ctx, a, "write"); e != nil {
+	if e := s.authorize(ctx, a, "inventory:write"); e != nil {
 		return i, e
 	}
 	tx, e := s.db.BeginTx(ctx, nil)
@@ -121,7 +121,7 @@ func (s *Service) SaveItem(ctx context.Context, a Actor, i Item) (Item, error) {
 	if e = tx.Commit(); e != nil {
 		return i, e
 	}
-	return s.Item(ctx, a, i.ID)
+	return s.itemRecord(ctx, i.ID)
 }
 
 // Shared by ordinary edits and atomic creation with initial stock/documents.
@@ -194,7 +194,7 @@ func saveItem(ctx context.Context, tx *sql.Tx, a Actor, i Item) (Item, error) {
 	return i, nil
 }
 func (s *Service) ArchiveItem(ctx context.Context, a Actor, id int64, archived bool) (Item, error) {
-	if e := s.authorize(ctx, a, "write"); e != nil {
+	if e := s.authorize(ctx, a, "inventory:write"); e != nil {
 		return Item{}, e
 	}
 	tx, e := s.db.BeginTx(ctx, nil)
@@ -216,5 +216,5 @@ func (s *Service) ArchiveItem(ctx context.Context, a Actor, id int64, archived b
 	if e = tx.Commit(); e != nil {
 		return Item{}, e
 	}
-	return s.Item(ctx, a, id)
+	return s.itemRecord(ctx, id)
 }

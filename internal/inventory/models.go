@@ -24,10 +24,12 @@ type User struct {
 	Disabled bool   `json:"disabled"`
 }
 
-// Actor is the boundary for future token scopes; transports must obtain it through authentication.
+// Actor is a trusted authentication result. Agent scopes and revocation are checked
+// against the token record on each service authorization.
 type Actor struct {
-	UserID int64
-	Scopes []string
+	TokenID int64
+	UserID  int64
+	Scopes  []string
 }
 type Item struct {
 	ID           int64             `json:"id"`
@@ -68,6 +70,7 @@ type Balance struct {
 	Quantity   float64 `json:"quantity"`
 }
 type Movement struct {
+	TokenID    *int64  `json:"token_id,omitempty"`
 	ID         int64   `json:"id"`
 	ItemID     int64   `json:"item_id"`
 	LocationID int64   `json:"location_id"`
@@ -83,15 +86,15 @@ type Stock struct {
 	History  []Movement `json:"history"`
 }
 type Adjustment struct {
-	LocationID int64   `json:"location_id"`
+	LocationID int64   `json:"location_id,omitempty"`
 	Quantity   float64 `json:"quantity"`
-	Reason     string  `json:"reason"`
+	Reason     string  `json:"reason,omitempty"`
 }
 type Transfer struct {
 	FromLocationID int64   `json:"from_location_id"`
 	ToLocationID   int64   `json:"to_location_id"`
 	Quantity       float64 `json:"quantity"`
-	Reason         string  `json:"reason"`
+	Reason         string  `json:"reason,omitempty"`
 }
 type Document struct {
 	ID           int64  `json:"id"`

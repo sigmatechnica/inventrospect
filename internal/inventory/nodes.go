@@ -9,7 +9,7 @@ import (
 
 func nodeKind(kind string) bool { return kind == "categories" || kind == "locations" }
 func (s *Service) Nodes(ctx context.Context, a Actor, kind string) ([]Node, error) {
-	if e := s.authorize(ctx, a, "read"); e != nil {
+	if e := s.authorize(ctx, a, "inventory:read"); e != nil {
 		return nil, e
 	}
 	if !nodeKind(kind) {

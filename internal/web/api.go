@@ -3,25 +3,12 @@ package web
 import (
 	"inventrospect/internal/inventory"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
-type itemInput struct {
-	Name         string            `json:"name"`
-	Description  string            `json:"description"`
-	CategoryID   *int64            `json:"category_id"`
-	Manufacturer string            `json:"manufacturer"`
-	MPN          string            `json:"mpn"`
-	Condition    string            `json:"condition"`
-	Notes        string            `json:"notes"`
-	Tags         []string          `json:"tags"`
-	Attributes   map[string]string `json:"attributes"`
-	Archived     bool              `json:"archived"`
-}
+type itemInput = inventory.ItemInput
 
-func (i itemInput) item(id int64) inventory.Item {
-	return inventory.Item{ID: id, Name: i.Name, Description: i.Description, CategoryID: i.CategoryID, Manufacturer: i.Manufacturer, MPN: i.MPN, Condition: i.Condition, Notes: i.Notes, Tags: i.Tags, Attributes: i.Attributes, Archived: i.Archived}
-}
 func (s *Server) api(w http.ResponseWriter, r *http.Request, a inventory.Actor) {
 	data, status, e := s.apiRequest(w, r, a)
 	if e != nil {
@@ -40,6 +27,73 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 	p = p[2:]
 	ctx := r.Context()
 	method := r.Method
+	if len(p) == 2 && p[0] == "agent" && p[1] == "me" {
+		if method != "GET" {
+			return nil, 0, methodError()
+		}
+		if a.TokenID == 0 {
+			return nil, 0, inventory.ErrAuth
+		}
+		return map[string]any{"user_id": a.UserID, "token_id": a.TokenID, "scopes": a.Scopes}, 200, nil
+	}
+	if len(p) == 3 && p[0] == "bulk" {
+		if method != "POST" {
+			return nil, 0, methodError()
+		}
+		switch p[1] + "/" + p[2] {
+		case "items/create":
+			var in struct {
+				Records []inventory.CreateItemInput `json:"records"`
+			}
+			if e := decode(r, &in); e != nil {
+				return nil, 0, e
+			}
+			v, e := s.service.BulkCreateItems(ctx, a, in.Records)
+			return v, 200, e
+		case "items/update":
+			var in struct {
+				Records []inventory.UpdateItemInput `json:"records"`
+			}
+			if e := decode(r, &in); e != nil {
+				return nil, 0, e
+			}
+			v, e := s.service.BulkUpdateItems(ctx, a, in.Records)
+			return v, 200, e
+		case "stock/adjustments":
+			var in struct {
+				Records []inventory.AdjustStockInput `json:"records"`
+			}
+			if e := decode(r, &in); e != nil {
+				return nil, 0, e
+			}
+			v, e := s.service.BulkAdjustStock(ctx, a, in.Records)
+			return v, 200, e
+		}
+		return nil, 0, inventory.ErrNotFound
+	}
+	if p[0] == "tokens" {
+		if len(p) == 1 && method == "GET" {
+			v, e := s.service.Tokens(ctx, a)
+			return v, 200, e
+		}
+		if len(p) == 1 && method == "POST" {
+			var in inventory.TokenInput
+			if e := decode(r, &in); e != nil {
+				return nil, 0, e
+			}
+			v, e := s.service.CreateToken(ctx, a, in)
+			return v, 201, e
+		}
+		if len(p) == 3 && p[2] == "revoke" && method == "POST" {
+			id, e := idValue(p[1])
+			if e != nil {
+				return nil, 0, e
+			}
+			e = s.service.RevokeToken(ctx, a, id)
+			return map[string]bool{"revoked": true}, 200, e
+		}
+		return nil, 0, methodError()
+	}
 	if len(p) == 1 {
 		switch p[0] {
 		case "settings":
@@ -109,7 +163,7 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 				if e := decode(r, &in); e != nil {
 					return nil, 0, e
 				}
-				i, e := s.service.CreateItem(ctx, a, in.item(0), in.InitialStock, nil)
+				i, e := s.service.CreateItem(ctx, a, in.Item(0), in.InitialStock, nil)
 				if e == nil {
 					w.Header().Set("Location", "/api/v1"+itemURL(i.ID))
 				}
@@ -183,7 +237,7 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 				if e = decode(r, &in); e != nil {
 					return nil, 0, e
 				}
-				i, e := s.service.SaveItem(ctx, a, in.item(id))
+				i, e := s.service.SaveItem(ctx, a, in.Item(id))
 				return i, 200, e
 			}
 			return nil, 0, methodError()
@@ -247,6 +301,33 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 				}
 				i, e := s.service.Item(ctx, a, id)
 				return i.Attributes, 200, e
+			case "stock-summary":
+				if method != "GET" {
+					return nil, 0, methodError()
+				}
+				v, e := s.service.StockSummary(ctx, a, id)
+				return v, 200, e
+			case "stock-history":
+				if method != "GET" {
+					return nil, 0, methodError()
+				}
+				limit := 50
+				before := int64(0)
+				var err error
+				if raw := r.URL.Query().Get("limit"); raw != "" {
+					limit, err = strconv.Atoi(raw)
+					if err != nil || limit <= 0 {
+						return nil, 0, &inventory.Error{Code: "validation", Message: "Invalid limit"}
+					}
+				}
+				if raw := r.URL.Query().Get("before_id"); raw != "" {
+					before, err = idValue(raw)
+					if err != nil {
+						return nil, 0, err
+					}
+				}
+				v, e := s.service.StockHistory(ctx, a, id, before, limit)
+				return v, 200, e
 			case "stock":
 				if method != "GET" {
 					return nil, 0, methodError()

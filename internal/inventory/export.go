@@ -10,7 +10,7 @@ import (
 
 // Export is a consistent inventory snapshot, including archived items. Files and ledger remain in the data directory.
 func (s *Service) Export(ctx context.Context, a Actor, w io.Writer) error {
-	if e := s.authorize(ctx, a, "read"); e != nil {
+	if e := s.authorize(ctx, a, "inventory:read"); e != nil {
 		return e
 	}
 	rows, e := s.db.QueryContext(ctx, "SELECT "+itemColumns+" FROM items i ORDER BY i.id")

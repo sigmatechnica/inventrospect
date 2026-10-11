@@ -104,6 +104,10 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, inventory.Ac
 			}
 			return
 		}
+		if a.TokenID != 0 && (!bearer || !strings.HasPrefix(r.URL.Path, "/api/")) {
+			s.fail(w, r, inventory.ErrForbidden)
+			return
+		}
 		if r.Method != "GET" && r.Method != "HEAD" {
 			if !sameOrigin(r) {
 				s.fail(w, r, inventory.ErrForbidden)
