@@ -56,6 +56,8 @@ type Node struct {
 	Path     string `json:"path"`
 }
 type Search struct {
+	Sort       string
+	Direction  string
 	Query      string
 	CategoryID int64
 	LocationID int64

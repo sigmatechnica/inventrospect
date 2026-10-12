@@ -252,27 +252,11 @@ func (s *Server) uiRequest(w http.ResponseWriter, r *http.Request, a inventory.A
 		return s.export(w, r, a)
 	case "items":
 		if len(parts) == 1 {
-			f, err := searchParams(r)
-			if err != nil {
-				return err
-			}
-			f.Limit = 100
-			data["Items"], e = s.service.Search(ctx, a, f)
-			if e != nil {
+			if e = s.explorer(r, a, data); e != nil {
 				return e
 			}
-			data["Filter"] = f
-			data["View"] = "list"
-			data["Title"] = "Inventory"
-			q := r.URL.Query()
-			q.Set("offset", strconv.Itoa(f.Offset+100))
-			data["NextURL"] = "/items?" + q.Encode()
-			prev := f.Offset - 100
-			if prev < 0 {
-				prev = 0
-			}
-			q.Set("offset", strconv.Itoa(prev))
-			data["PrevURL"] = "/items?" + q.Encode()
+			s.render(w, r, 200, data)
+			return nil
 		} else if len(parts) == 2 && parts[1] == "new" {
 			if u.Role == "viewer" {
 				return inventory.ErrForbidden

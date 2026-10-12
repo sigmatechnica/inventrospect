@@ -1,0 +1,42 @@
+{{define "tree"}}<ul class="tree">{{range .}}<li>{{if .Children}}<details data-branch="{{.Key}}" {{if .Open}}open data-selected-branch="true"{{end}}><summary><a data-view href="{{.URL}}" title="{{.Path}}" {{if .Selected}}aria-current="true"{{end}}>{{.Name}}</a></summary>{{template "tree" .Children}}</details>{{else}}<a class="tree-leaf" data-view href="{{.URL}}" title="{{.Path}}" {{if .Selected}}aria-current="true"{{end}}>{{.Name}}</a>{{end}}</li>{{end}}</ul>{{end}}
+
+{{define "explorer"}}
+<div id="explorer">
+<div class="explorer-heading"><div class="actions"><button type="button" id="sidebar-toggle" class="secondary js-only" aria-controls="explorer-sidebar" aria-expanded="true">☰ Navigation</button><span class="muted">Inventory explorer</span></div>{{if .CanEdit}}<a class="button" href="/items/new">+ New item</a>{{end}}</div>
+<div class="explorer-layout">
+<aside id="explorer-sidebar" aria-label="Inventory navigation">
+<a class="all-items" data-view href="/items" {{if and (not .Filter.CategoryID) (not .Filter.LocationID)}}aria-current="true"{{end}}>All items</a>
+<div class="tree-heading"><h2>Categories</h2><a data-view href="{{.AllCategoriesURL}}" aria-label="Clear category filter">All</a></div>
+{{template "tree" .CategoryTree}}
+{{if not .CategoryTree}}<p class="muted">No categories yet.</p>{{end}}
+<div class="tree-heading"><h2>Locations</h2><a data-view href="{{.AllLocationsURL}}" aria-label="Clear location filter">All</a></div>
+{{template "tree" .LocationTree}}
+{{if not .LocationTree}}<p class="muted">No locations yet.</p>{{end}}
+<p class="tree-help muted">Parent selections include descendants. Categories and locations combine.</p>
+</aside>
+<div class="explorer-results">
+<form id="explorer-search" class="explorer-filters" action="/items" method="get" role="search">
+<label class="search-query">Search inventory<input type="search" name="q" value="{{.Filter.Query}}" placeholder="Name, MPN, manufacturer, notes, tags…" autocomplete="off"></label>
+{{if .Filter.CategoryID}}<input type="hidden" name="category_id" value="{{.Filter.CategoryID}}">{{end}}
+{{if .Filter.LocationID}}<input type="hidden" name="location_id" value="{{.Filter.LocationID}}">{{end}}
+<input type="hidden" name="sort" value="{{.Filter.Sort}}"><input type="hidden" name="direction" value="{{.Filter.Direction}}">
+<label>Stock<select name="stock"><option value="">Any stock</option><option value="in" {{if eq .Filter.Stock "in"}}selected{{end}}>In stock</option><option value="out" {{if eq .Filter.Stock "out"}}selected{{end}}>Out of stock</option></select></label>
+<label>State<select name="archived"><option value="false">Active</option><option value="true" {{if eq .Filter.Archived "true"}}selected{{end}}>Archived</option><option value="all" {{if eq .Filter.Archived "all"}}selected{{end}}>All states</option></select></label>
+<label>Rows<select name="limit"><option {{if eq .Filter.Limit 25}}selected{{end}}>25</option><option {{if eq .Filter.Limit 50}}selected{{end}}>50</option><option {{if eq .Filter.Limit 100}}selected{{end}}>100</option></select></label>
+<button type="submit">Search</button>
+</form>
+<div class="explorer-tools"><div class="active-filters" aria-label="Active filters">
+{{if .Filter.CategoryID}}<a data-view class="filter-chip" href="{{.AllCategoriesURL}}" title="Remove category filter">Category: {{.CategoryPath}} ×</a>{{end}}
+{{if .Filter.LocationID}}<a data-view class="filter-chip" href="{{.AllLocationsURL}}" title="Remove location filter">Location: {{.LocationPath}} ×</a>{{end}}
+{{if .Filter.Query}}<span class="filter-chip">Search: {{.Filter.Query}}</span>{{end}}
+{{if .Filter.Stock}}<span class="filter-chip">{{if eq .Filter.Stock "in"}}In stock{{else}}Out of stock{{end}}{{if .Filter.LocationID}} at selected location{{end}}</span>{{end}}
+<span class="muted">{{if eq .Filter.Archived "true"}}Archived{{else if eq .Filter.Archived "all"}}All states{{else}}Active{{end}}</span><a data-view href="/items">Reset filters</a>
+</div>
+<details class="column-picker js-only"><summary>Columns</summary><div>{{range .Columns}}<label class="check"><input type="checkbox" data-column-toggle="{{.Key}}" {{if not .Optional}}checked{{end}} {{if eq .Key "name"}}disabled{{end}}>{{.Label}}</label>{{end}}</div></details></div>
+<p id="explorer-status" class="muted" role="status" aria-live="polite">{{.Total}} matching items</p>
+<div class="table-wrap explorer-table-wrap"><table class="explorer-table"><caption class="sr-only">Inventory results. Column headings sort results; item names open full details.</caption><thead><tr>{{range .Columns}}<th data-column="{{.Key}}" {{if .Optional}}hidden{{end}} {{if .Direction}}aria-sort="{{.Direction}}"{{end}}>{{if .URL}}<a data-view href="{{.URL}}">{{.Label}} {{if eq .Direction "ascending"}}↑{{else if eq .Direction "descending"}}↓{{else}}↕{{end}}</a>{{else}}{{.Label}}{{end}}</th>{{end}}</tr></thead><tbody>
+{{range .Rows}}{{$row := .}}<tr>{{range $j,$cell := .Cells}}{{$col := index $.Columns $j}}<td data-column="{{$col.Key}}" {{if $col.Optional}}hidden{{end}} title="{{if eq $col.Key "category"}}{{$row.CategoryPath}}{{else if eq $col.Key "location"}}{{$row.LocationPaths}}{{else}}{{$cell}}{{end}}">{{if eq $col.Key "name"}}<a href="/items/{{$row.ID}}">{{$cell}}</a>{{else}}{{$cell}}{{end}}</td>{{end}}</tr>{{else}}<tr><td colspan="12" class="empty-results">No matching items. Try clearing a filter or changing your search.</td></tr>{{end}}
+</tbody></table></div>
+<div class="explorer-pagination"><span>{{.Start}}–{{.End}} of {{.Total}} items</span><div class="actions">{{if .PrevURL}}<a class="button secondary" data-view href="{{.PrevURL}}" rel="prev">← Previous</a>{{else}}<span class="muted">← Previous</span>{{end}}{{if .NextURL}}<a class="button secondary" data-view href="{{.NextURL}}" rel="next">Next →</a>{{else}}<span class="muted">Next →</span>{{end}}</div></div>
+</div></div></div>
+{{end}}

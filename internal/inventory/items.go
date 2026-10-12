@@ -37,13 +37,35 @@ func (s *Service) Search(ctx context.Context, a Actor, f Search) ([]Item, error)
 	if e := s.authorize(ctx, a, "inventory:read"); e != nil {
 		return nil, e
 	}
+	query, args, e := searchQuery(f)
+	if e != nil {
+		return nil, e
+	}
+	rows, e := s.db.QueryContext(ctx, "SELECT "+itemColumns+query, args...)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := []Item{}
+	for rows.Next() {
+		i, err := scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, i)
+	}
+	return out, rows.Err()
+}
+
+// searchQuery is shared by paginated results and exact counts.
+func searchQuery(f Search) (string, []any, error) {
 	if f.Limit == 0 {
 		f.Limit = 100
 	}
 	if f.Limit < 1 || f.Limit > 1000 || f.Offset < 0 {
-		return nil, invalid("limit must be 1–1000 and offset must be nonnegative")
+		return "", nil, invalid("limit must be 1–1000 and offset must be nonnegative")
 	}
-	query := "SELECT " + itemColumns + " FROM items i WHERE 1=1"
+	query := " FROM items i WHERE 1=1"
 	args := []any{}
 	if f.Query != "" {
 		query += ` AND (i.name LIKE ? ESCAPE '\' OR i.description LIKE ? ESCAPE '\' OR i.manufacturer LIKE ? ESCAPE '\' OR i.mpn LIKE ? ESCAPE '\' OR i.notes LIKE ? ESCAPE '\' OR EXISTS(SELECT 1 FROM json_each(i.tags) WHERE value LIKE ? ESCAPE '\'))`
@@ -67,7 +89,7 @@ func (s *Service) Search(ctx context.Context, a Actor, f Search) ([]Item, error)
 	}
 	if f.Stock != "" {
 		if f.Stock != "in" && f.Stock != "out" {
-			return nil, invalid("stock must be in or out")
+			return "", nil, invalid("stock must be in or out")
 		}
 		query += " AND " + balance
 		if f.Stock == "in" {
@@ -86,24 +108,21 @@ func (s *Service) Search(ctx context.Context, a Actor, f Search) ([]Item, error)
 		query += " AND i.archived=1"
 	case "all":
 	default:
-		return nil, invalid("archived must be false, true or all")
+		return "", nil, invalid("archived must be false, true or all")
 	}
-	query += " ORDER BY i.name COLLATE NOCASE,i.id LIMIT ? OFFSET ?"
+	column := map[string]string{"": "i.name COLLATE NOCASE", "name": "i.name COLLATE NOCASE", "manufacturer": "i.manufacturer COLLATE NOCASE", "mpn": "i.mpn COLLATE NOCASE", "category": "COALESCE((SELECT name FROM categories WHERE id=i.category_id),'') COLLATE NOCASE", "quantity": `COALESCE((SELECT SUM(quantity) FROM stock_movements WHERE item_id=i.id),0)`}[f.Sort]
+	if column == "" {
+		return "", nil, invalid("Unknown sort column")
+	}
+	direction := " ASC"
+	if f.Direction == "desc" {
+		direction = " DESC"
+	} else if f.Direction != "" && f.Direction != "asc" {
+		return "", nil, invalid("direction must be asc or desc")
+	}
+	query += " ORDER BY " + column + direction + ",i.id LIMIT ? OFFSET ?"
 	args = append(args, f.Limit, f.Offset)
-	rows, e := s.db.QueryContext(ctx, query, args...)
-	if e != nil {
-		return nil, e
-	}
-	defer rows.Close()
-	out := []Item{}
-	for rows.Next() {
-		i, err := scanItem(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, i)
-	}
-	return out, rows.Err()
+	return query, args, nil
 }
 func (s *Service) SaveItem(ctx context.Context, a Actor, i Item) (Item, error) {
 	if e := s.authorize(ctx, a, "inventory:write"); e != nil {

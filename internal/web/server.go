@@ -23,7 +23,7 @@ import (
 	"inventrospect/internal/inventory"
 )
 
-//go:embed templates.html style.css
+//go:embed templates.html explorer.html style.css explorer.js
 var assets embed.FS
 
 type Server struct {
@@ -42,8 +42,13 @@ func New(s *inventory.Service, secure bool) http.Handler {
 		}
 		return i - 100
 	}}
-	srv := &Server{service: s, secure: secure, templates: template.Must(template.New("templates.html").Funcs(funcs).ParseFS(assets, "templates.html"))}
+	srv := &Server{service: s, secure: secure, templates: template.Must(template.New("templates.html").Funcs(funcs).ParseFS(assets, "templates.html", "explorer.html"))}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /explorer.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		b, _ := assets.ReadFile("explorer.js")
+		w.Write(b)
+	})
 	mux.HandleFunc("GET /style.css", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 		b, _ := assets.ReadFile("style.css")
@@ -59,7 +64,7 @@ func New(s *inventory.Service, secure bool) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'none'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 		maxBody := inventory.MaxDocumentSize + 1024*1024
 		if r.Method == "POST" && (r.URL.Path == "/items/new" || r.URL.Path == "/api/v1/items") {
 			maxBody = inventory.MaxInitialUploadSize + 1024*1024
@@ -297,7 +302,7 @@ func methodError() error {
 }
 func searchParams(r *http.Request) (inventory.Search, error) {
 	q := r.URL.Query()
-	f := inventory.Search{Query: q.Get("q"), Stock: q.Get("stock"), Archived: q.Get("archived")}
+	f := inventory.Search{Query: q.Get("q"), Stock: q.Get("stock"), Archived: q.Get("archived"), Sort: q.Get("sort"), Direction: q.Get("direction")}
 	var e error
 	for key, dest := range map[string]*int64{"category_id": &f.CategoryID, "location_id": &f.LocationID} {
 		if q.Get(key) != "" {

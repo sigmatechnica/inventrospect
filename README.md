@@ -74,6 +74,31 @@ hashes. Login attempts are limited to 30 per minute across this server instance.
 
 ## Architecture
 
+The inventory explorer combines category and location trees with search, stock
+availability and active/archived filters. Parent selections include descendants.
+Filters, sorting and pagination are bookmarkable URL parameters; pages contain
+25, 50 (default), or 100 items with an exact matching count. Totals always show
+stock across all locations; the stock filter applies to the selected location
+and its descendants when one is selected. “Out of stock” there includes items
+with no stock history at that location, preserving the existing search behavior.
+
+Click sortable headings for name, manufacturer, MPN, category (category name),
+or total stock; ties use item ID for stable pagination. The existing REST
+`GET /api/v1/items` also accepts `sort=name|manufacturer|mpn|category|quantity`
+and `direction=asc|desc`; its response shape and default ordering are unchanged.
+No database migration or dependency was added for the explorer.
+
+The Columns menu adds tags, description, creation/update timestamps and item ID,
+or hides default columns. Columns, collapsed sidebar and expanded branches are
+saved in this browser. Small screens default to name, MPN and stock, with all
+columns available through the menu. Search is debounced by 350 ms and stale
+requests are cancelled. Without JavaScript, the trees, links, Search form and
+pagination still work. Item names open the existing full detail/workflow page.
+An inline details panel and custom-attribute columns are deliberately deferred.
+Hierarchies are rendered once per response with collapsed native details branches;
+there are no per-node or per-item network requests. Very large hierarchies are
+not virtualized, and text search retains SQLite's existing substring matching.
+
 ```text
 cmd/server/             configuration, bootstrap and HTTP lifecycle
 internal/inventory/     domain types, authorization, validation, SQLite services
@@ -85,7 +110,8 @@ internal/mcpserver/     optional MCP adapter over REST, using the official Go SD
 cmd/mcp/                stdio or Streamable HTTP adapter lifecycle
 internal/web/           REST and HTML adapters over the same services
   templates.html        embedded, escaped HTML templates
-  style.css             embedded stylesheet; no JavaScript
+  style.css             embedded stylesheet
+  explorer.html/.js     explorer template and progressive enhancement
 ```
 
 `inventory.Service` owns the database and document directory. Both transports call
@@ -282,7 +308,13 @@ is deleted by normal application operations.
 go test ./...
 go vet ./...
 go build -o bin/inventrospect ./cmd/server
+node --test internal/web/explorer.test.cjs
 ```
+
+Node is optional for running the small JavaScript interaction tests and is not a
+build/runtime dependency. Explorer tests cover combined descendant filters,
+stable sorting, counts/pagination, role-dependent controls, compact location
+summaries, debouncing, and a disposable 30,000-item scale fixture.
 
 Tests cover CRUD, search, export, hierarchy cycles, stock arithmetic including
 whole-number validation, preserved legacy fractional history, atomic creation
