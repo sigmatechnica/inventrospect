@@ -57,6 +57,9 @@ func (s *Service) DocumentContent(ctx context.Context, a Actor, id int64) (Docum
 		return d, nil, e
 	}
 	f, e := os.Open(filepath.Join(s.dataDir, "documents", d.storageKey))
+	if os.IsNotExist(e) {
+		return d, nil, ErrNotFound
+	}
 	return d, f, e
 }
 func (s *Service) AttachDocument(ctx context.Context, a Actor, id int64, d Document, r io.Reader) (Document, error) {
@@ -172,11 +175,12 @@ func (s *Service) prepareDocument(a Actor, d Document, r io.Reader) (Document, e
 }
 func insertDocument(ctx context.Context, tx *sql.Tx, a Actor, id int64, d Document) (Document, error) {
 	d.ItemID = id
-	res, e := tx.ExecContext(ctx, `INSERT INTO documents(item_id,title,filename,type,source_url,manufacturer,revision,sha256,size,storage_key,uploaded_at,uploaded_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, d.ItemID, d.Title, d.Filename, d.Type, d.SourceURL, d.Manufacturer, d.Revision, d.SHA256, d.Size, d.storageKey, d.UploadedAt, d.UploadedBy)
+	var e error
+	d.ID, e = nextResourceID(ctx, tx, "documents")
 	if e != nil {
 		return d, e
 	}
-	d.ID, e = res.LastInsertId()
+	_, e = tx.ExecContext(ctx, `INSERT INTO documents(id,item_id,title,filename,type,source_url,manufacturer,revision,sha256,size,storage_key,uploaded_at,uploaded_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, d.ID, d.ItemID, d.Title, d.Filename, d.Type, d.SourceURL, d.Manufacturer, d.Revision, d.SHA256, d.Size, d.storageKey, d.UploadedAt, d.UploadedBy)
 	if e != nil {
 		return d, e
 	}

@@ -44,22 +44,21 @@ func (s *Service) Nodes(ctx context.Context, a Actor, kind string) ([]Node, erro
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
 }
-func (s *Service) SaveNode(ctx context.Context, a Actor, kind string, n Node) (Node, error) {
-	if e := s.authorize(ctx, a, "write"); e != nil {
-		return n, e
-	}
+func (s *Service) SaveNode(ctx context.Context, a Actor, kind string, n Node, keys ...string) (Node, error) {
 	if !nodeKind(kind) {
 		return n, invalid("Unknown hierarchy")
 	}
+	if e := s.authorize(ctx, a, kind+":write"); e != nil {
+		return n, e
+	}
+	return mutate(s, ctx, a, "save_"+kind, requestKey(keys), n, func(tx *sql.Tx) (Node, error) { return saveNode(ctx, tx, a, kind, n) })
+}
+func saveNode(ctx context.Context, tx *sql.Tx, a Actor, kind string, n Node) (Node, error) {
 	n.Name = clean(n.Name)
 	if n.Name == "" || len(n.Name) > 200 {
 		return n, invalid("Name must be 1–200 characters")
 	}
-	tx, e := s.db.BeginTx(ctx, nil)
-	if e != nil {
-		return n, e
-	}
-	defer tx.Rollback()
+	var e error
 	if n.ID != 0 {
 		if e = exists(ctx, tx, kind, n.ID); e != nil {
 			return n, e
@@ -99,7 +98,7 @@ func (s *Service) SaveNode(ctx context.Context, a Actor, kind string, n Node) (N
 	if e = audit(ctx, tx, a, "save", kind, n.ID); e != nil {
 		return n, e
 	}
-	return n, tx.Commit()
+	return n, nil
 }
 
 // DeleteNode removes only unreferenced leaves, preserving items and stock history.

@@ -46,7 +46,7 @@ func TestAPIValidationPermissionsAndCRUD(t *testing.T) {
 	for _, tc := range []struct {
 		method, path, body string
 		status             int
-	}{{"POST", "/api/v1/items", `{"name":""}`, 400}, {"POST", "/api/v1/items", `{"name":"x","unknown":1}`, 400}, {"POST", "/api/v1/items", `{"name":"x"} {}`, 400}, {"POST", "/api/v1/items", `null`, 400}, {"GET", "/api/v1/items?limit=-1", "", 400}, {"GET", "/api/v1/items?offset=no", "", 400}, {"GET", "/api/v1/items?archived=no", "", 400}, {"GET", "/api/v1/items/no", "", 400}, {"GET", "/api/v1/items/999", "", 404}, {"DELETE", "/api/v1/items/1", "", 405}} {
+	}{{"POST", "/api/v1/items", `{"name":""}`, 400}, {"POST", "/api/v1/items", `{"name":"x","unknown":1}`, 400}, {"POST", "/api/v1/items", `{"name":"x"} {}`, 400}, {"POST", "/api/v1/items", `null`, 400}, {"GET", "/api/v1/items?limit=-1", "", 400}, {"GET", "/api/v1/items?offset=no", "", 400}, {"GET", "/api/v1/items?archived=no", "", 400}, {"GET", "/api/v1/items/no", "", 400}, {"GET", "/api/v1/items/999", "", 404}, {"DELETE", "/api/v1/items/1", "", 404}} {
 		w := request(h, tc.method, tc.path, tc.body, token)
 		if w.Code != tc.status {
 			t.Fatalf("%s %s: %d %s", tc.method, tc.path, w.Code, w.Body.String())

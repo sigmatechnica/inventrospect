@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log"
 )
@@ -9,25 +10,34 @@ import (
 // ItemInput is the editable item contract shared by REST and bulk operations.
 // PUT is a full replacement of these fields, not a merge.
 type ItemInput struct {
-	Name         string            `json:"name" jsonschema:"Item name (required)"`
-	Description  string            `json:"description,omitempty" jsonschema:"Human-readable item description"`
-	CategoryID   *int64            `json:"category_id,omitempty" jsonschema:"Existing category ID, or null for uncategorized"`
-	Manufacturer string            `json:"manufacturer,omitempty"`
-	MPN          string            `json:"mpn,omitempty"`
-	Condition    string            `json:"condition,omitempty"`
-	Notes        string            `json:"notes,omitempty"`
-	Tags         []string          `json:"tags,omitempty" jsonschema:"Free-form tags; replacement replaces the entire list"`
-	Attributes   map[string]string `json:"attributes,omitempty" jsonschema:"Free-form attribute names mapped to string values including units"`
-	Archived     bool              `json:"archived,omitempty"`
+	ExpectedRevision *int64            `json:"expected_revision,omitempty"`
+	Name             string            `json:"name" jsonschema:"Item name (required)"`
+	Description      string            `json:"description,omitempty" jsonschema:"Human-readable item description"`
+	CategoryID       *int64            `json:"category_id,omitempty" jsonschema:"Existing category ID, or null for uncategorized"`
+	Manufacturer     string            `json:"manufacturer,omitempty"`
+	MPN              string            `json:"mpn,omitempty"`
+	Condition        string            `json:"condition,omitempty"`
+	Notes            string            `json:"notes,omitempty"`
+	Tags             []string          `json:"tags,omitempty" jsonschema:"Free-form tags; replacement replaces the entire list"`
+	Attributes       map[string]string `json:"attributes,omitempty" jsonschema:"Free-form attribute names mapped to string values including units"`
+	Archived         bool              `json:"archived,omitempty"`
 }
 
 func (i ItemInput) Item(id int64) Item {
-	return Item{ID: id, Name: i.Name, Description: i.Description, CategoryID: i.CategoryID, Manufacturer: i.Manufacturer, MPN: i.MPN, Condition: i.Condition, Notes: i.Notes, Tags: i.Tags, Attributes: i.Attributes, Archived: i.Archived}
+	out := Item{ID: id, Name: i.Name, Description: i.Description, CategoryID: i.CategoryID, Manufacturer: i.Manufacturer, MPN: i.MPN, Condition: i.Condition, Notes: i.Notes, Tags: i.Tags, Attributes: i.Attributes, Archived: i.Archived}
+	if i.ExpectedRevision != nil {
+		out.Revision = *i.ExpectedRevision
+		if out.Revision < 1 {
+			out.Revision = -1
+		}
+	}
+	return out
 }
 
 type CreateItemInput struct {
-	Item         ItemInput  `json:"item" jsonschema:"Editable item fields"`
-	InitialStock Adjustment `json:"initial_stock,omitempty" jsonschema:"Optional initial stock; positive quantity requires stock:write and a location or configured default"`
+	ClientRequestID string     `json:"client_request_id,omitempty" jsonschema:"Optional durable retry key: unix-seconds:unique-suffix; valid 7 days"`
+	Item            ItemInput  `json:"item" jsonschema:"Editable item fields"`
+	InitialStock    Adjustment `json:"initial_stock,omitempty" jsonschema:"Optional initial stock; positive quantity requires stock:write and a location or configured default"`
 }
 type UpdateItemInput struct {
 	ID   int64     `json:"id" jsonschema:"Explicit positive ID of an existing item"`
@@ -56,7 +66,7 @@ func bulkResult(index int, data any, err error) BulkResult {
 	var known *Error
 	if !errors.As(err, &known) {
 		log.Printf("bulk record %d: %v", index, err)
-		known = &Error{"internal", "An internal error occurred"}
+		known = &Error{Code: "internal", Message: "An internal error occurred"}
 	}
 	return BulkResult{Index: index, Error: known}
 }
@@ -76,15 +86,38 @@ func runBulk(n int, fn func(int) (any, error)) (BulkResponse, error) {
 	}
 	return out, nil
 }
-func (s *Service) BulkCreateItems(ctx context.Context, a Actor, records []CreateItemInput) (BulkResponse, error) {
+func (s *Service) BulkCreateItems(ctx context.Context, a Actor, records []CreateItemInput, keys ...string) (BulkResponse, error) {
+	if e := s.checkBulk(len(records)); e != nil {
+		return BulkResponse{}, e
+	}
 	if e := s.authorize(ctx, a, "inventory:write"); e != nil {
 		return BulkResponse{}, e
 	}
+	if key := requestKey(keys); key != "" {
+		for _, r := range records {
+			if r.ClientRequestID != "" {
+				return BulkResponse{}, invalid("Use the bulk request key, not per-record keys")
+			}
+			if r.InitialStock.Quantity != 0 {
+				if e := s.authorize(ctx, a, "stock:write"); e != nil {
+					return BulkResponse{}, e
+				}
+			}
+		}
+		return mutate(s, ctx, a, "bulk_create_items", key, records, func(tx *sql.Tx) (BulkResponse, error) {
+			return bulkTx(ctx, tx, len(records), func(j int) (any, error) {
+				return createItemTx(ctx, tx, a, records[j].Item.Item(0), records[j].InitialStock, nil)
+			})
+		})
+	}
 	return runBulk(len(records), func(i int) (any, error) {
-		return s.CreateItem(ctx, a, records[i].Item.Item(0), records[i].InitialStock, nil)
+		return s.CreateItem(ctx, a, records[i].Item.Item(0), records[i].InitialStock, nil, records[i].ClientRequestID)
 	})
 }
 func (s *Service) BulkUpdateItems(ctx context.Context, a Actor, records []UpdateItemInput) (BulkResponse, error) {
+	if e := s.checkBulk(len(records)); e != nil {
+		return BulkResponse{}, e
+	}
 	if e := s.authorize(ctx, a, "inventory:write"); e != nil {
 		return BulkResponse{}, e
 	}
@@ -95,11 +128,57 @@ func (s *Service) BulkUpdateItems(ctx context.Context, a Actor, records []Update
 		return s.SaveItem(ctx, a, records[i].Item.Item(records[i].ID))
 	})
 }
-func (s *Service) BulkAdjustStock(ctx context.Context, a Actor, records []AdjustStockInput) (BulkResponse, error) {
+func (s *Service) BulkAdjustStock(ctx context.Context, a Actor, records []AdjustStockInput, keys ...string) (BulkResponse, error) {
+	if e := s.checkBulk(len(records)); e != nil {
+		return BulkResponse{}, e
+	}
 	if e := s.authorize(ctx, a, "stock:write"); e != nil {
 		return BulkResponse{}, e
 	}
+	if key := requestKey(keys); key != "" {
+		return mutate(s, ctx, a, "bulk_adjust_stock", key, records, func(tx *sql.Tx) (BulkResponse, error) {
+			return bulkTx(ctx, tx, len(records), func(j int) (any, error) { return adjustStockTx(ctx, tx, a, records[j].ItemID, records[j].Adjustment) })
+		})
+	}
 	return runBulk(len(records), func(i int) (any, error) { return s.AdjustStock(ctx, a, records[i].ItemID, records[i].Adjustment) })
+}
+
+// Keyed batches commit successes and their full indexed response together.
+// Savepoints isolate invalid records; a process failure rolls back the batch.
+func bulkTx(ctx context.Context, tx *sql.Tx, n int, fn func(int) (any, error)) (BulkResponse, error) {
+	out := BulkResponse{Results: []BulkResult{}, Semantics: "Valid records and the replay result commit together; invalid records roll back to savepoints. Retry the identical batch with the same client_request_id."}
+	if n < 1 || n > 100 {
+		return out, invalid("A bulk request must contain 1–100 records")
+	}
+	for j := 0; j < n; j++ {
+		if _, e := tx.ExecContext(ctx, "SAVEPOINT bulk_record"); e != nil {
+			return out, e
+		}
+		v, e := fn(j)
+		if e != nil {
+			if _, err := tx.ExecContext(ctx, "ROLLBACK TO bulk_record"); err != nil {
+				return out, err
+			}
+			out.Failed++
+		} else {
+			out.Succeeded++
+		}
+		if _, err := tx.ExecContext(ctx, "RELEASE bulk_record"); err != nil {
+			return out, err
+		}
+		out.Results = append(out.Results, bulkResult(j, v, e))
+	}
+	return out, nil
+}
+
+func (s *Service) BulkPatchItems(ctx context.Context, a Actor, records []PatchItemInput) (BulkResponse, error) {
+	if e := s.checkBulk(len(records)); e != nil {
+		return BulkResponse{}, e
+	}
+	if e := s.authorize(ctx, a, "inventory:write"); e != nil {
+		return BulkResponse{}, e
+	}
+	return runBulk(len(records), func(j int) (any, error) { return s.PatchItem(ctx, a, records[j].ID, records[j].PatchInput) })
 }
 
 type HistoryPage struct {

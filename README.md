@@ -105,6 +105,7 @@ internal/inventory/     domain types, authorization, validation, SQLite services
   schema.sql            original embedded version-1 migration
   migration2.sql        user theme and shared default location
   migration3.sql        hashed agent tokens and token audit attribution
+  migration4.sql        revisions, durable retries, deletion cleanup and stable IDs
   *_test.go             domain and persistence tests
 internal/mcpserver/     optional MCP adapter over REST, using the official Go SDK
 cmd/mcp/                stdio or Streamable HTTP adapter lifecycle
@@ -139,14 +140,15 @@ history. JSON/CSV quantities therefore may still be fractional for legacy record
 The maximum item total remains 1,000,000,000 units. Negative location stock is rejected. Choose a
 consistent physical unit per item (e.g. record `stock_unit: "m"` as an attribute);
 there is no unit conversion. A transfer inserts a debit and credit with a shared
-opaque `transfer_id` in one transaction. History is immutable; corrections are
+opaque `transfer_id` in one transaction. History is immutable except during explicit permanent item deletion; corrections are
 new signed adjustments. Archived items retain their stock/history/documents and
 cannot receive stock mutations until restored.
 
 Item/user/hierarchy/document mutations record actor/time audit events; stock
 entries carry the actor and timestamp directly. Audit events identify the action
-and resource, but are not a full before/after revision store. Item updates are
-last-write-wins; stock updates are transactional. Files are immutable through
+and resource, but are not a full before/after revision store. Item patches merge supplied fields transactionally; an optional expected revision
+rejects stale writes. Unconditional updates to the same field remain last-write-wins.
+Stock updates are transactional. Files are immutable through
 the public interface and are never fetched from source URLs. Uploaded content
 is always downloaded as an attachment with `nosniff`, never rendered as HTML.
 
@@ -154,7 +156,7 @@ is always downloaded as an attachment with `nosniff`, never rendered as HTML.
 
 Base path: `/api/v1`. Successful responses are `{"data": ...}`. Arrays are always
 arrays, even when empty. Errors are `{"error":{"code":"validation","message":"..."}}`
-with HTTP 400, 401, 403, 404, 405, 429 or 500. Internal errors are logged without
+with HTTP 400, 401, 403, 404, 405, 409, 429 or 500. Internal errors are logged without
 returning database details. JSON mutations require `Content-Type: application/json`,
 reject unknown fields and accept one JSON value. Server-owned IDs, quantities,
 audit fields and timestamps are not accepted on item writes.
@@ -184,8 +186,10 @@ audit fields and timestamps are not accepted on item writes.
 | GET | `/export.csv` | Inventory CSV attachment (not JSON) |
 
 Paths in this table are relative to `/api/v1`. Create responses use HTTP 201;
-other successful JSON operations use HTTP 200. DELETE is limited to unused category/location leaves; items and stock history
-are preserved. Deletion returns `{ "data": { "deleted": true } }`. PUT uses **full replacement**, not a partial merge: omitted strings,
+other successful JSON operations use HTTP 200. Category/location deletion is limited
+to unused leaves and returns `{ "data": { "deleted": true } }`. Permanent item
+deletion requires separate authorization and returns dependency counts (see below).
+PUT uses **full replacement**, not a partial merge: omitted strings,
 tags, attributes, category and archived state are cleared/reset. For archive-only
 changes, use the dedicated archive endpoint. Password omission on user update
 is the specific exception: it preserves the existing password hash.
@@ -247,8 +251,8 @@ Example stock body:
 {"location_id": 1, "quantity": 50, "reason": "Initial counted stock"}
 ```
 
-Stock POSTs are **not idempotent**. Do not blindly retry a mutation following a
-network timeout; first inspect history to establish whether it committed.
+Stock POSTs accept an optional `client_request_id` for durable retries (see below).
+Without a key, inspect history after an uncertain response before retrying.
 
 Document upload uses multipart fields `file`, `type`, optional `title` (defaults
 to filename),
@@ -299,8 +303,8 @@ without coordination does not guarantee a consistent backup. The database
 contains password/session hashes and the opaque filename mapping, so protect
 backups as carefully as the original directory. Documents are fsynced and renamed
 before their metadata commits. A process crash in that small interval can leave
-an unreferenced file; v0 does not automatically remove orphans. No committed file
-is deleted by normal application operations.
+an unreferenced file; arbitrary crash orphans are not automatically removed.
+Permanent item deletion queues associated files for safe cleanup after commit.
 
 ## Tests
 
@@ -347,8 +351,9 @@ go build -o bin/inventrospect-mcp ./cmd/mcp
 ```
 
 On upgrade, stop the old application, back up the data directory, and start the
-new binary. Migration 3 adds token records and nullable token IDs on audit events
-and stock history; existing inventory and human sessions are preserved.
+new binary. Migration 4 adds item revisions, durable idempotency results, deletion
+tombstones/cleanup and monotonic item/document/movement IDs. Existing inventory,
+tokens and human sessions are preserved; no new dependencies are required.
 
 Sign in as an admin and open **Agent tokens** (`/tokens`). Choose a name, active
 acting user, scopes and optional RFC3339 expiry. Copy the secret immediately: it
@@ -363,16 +368,19 @@ and service authorization, including already-connected MCP clients.
 | Scope | Capability |
 | --- | --- |
 | `inventory:read` | Search, item fields/attributes and aggregate quantity, categories/locations, export |
-| `inventory:write` | Create, fully replace or archive items, including bulk item operations |
+| `inventory:write` | Create, patch, fully replace or archive items, including bulk item operations |
 | `stock:read` | Per-location balances and stock history |
 | `stock:write` | Adjust, move or initialize stock, including bulk adjustments |
 | `documents:read` | Document metadata and actual file content |
 | `documents:write` | Attach supplied files |
+| `categories:write` | Create/patch category hierarchy |
+| `locations:write` | Create/patch location hierarchy |
+| `inventory:delete` | Irreversibly delete explicit items and their dependent records |
 
 Scopes are independent and also bounded by the owner’s current role. A write
 scope permits its mutation response but does not grant separate read tools. No
-agent scope grants user/token management, settings changes, hierarchy mutations
-or hard deletion. Agents do not use human login sessions. A read-only agent
+agent scope grants user/token management, settings changes or hierarchy deletion.
+Permanent item deletion requires its own scope, never selected by default. Agents do not use human login sessions. A read-only agent
 usually needs all three `:read` scopes.
 
 **Stdio:** keep the application running, then let the MCP client launch:
@@ -431,19 +439,26 @@ optional adapter’s port.
 | `document_list` | Paginated metadata; no file bytes |
 | `document_get` | Actual binary document; `metadata_only=true` returns a resource link instead |
 | `inventory_create_item` | Create `{ "item": {...}, "initial_stock": {...} }`; stock is optional |
-| `inventory_update_item` | Full replacement `{ "id": 123, "item": {...} }`; omitted fields clear/reset |
+| `inventory_patch_item` | Safe partial update with optional expected revision |
+| `inventory_update_item` | Compatibility alias for partial updates; legacy `item` also merges |
 | `inventory_archive_item` | Set `{ "id": 123, "archived": true }`; false restores |
 | `inventory_adjust_stock` | Signed whole-number delta at explicit item/location |
 | `inventory_move_stock` | Atomic debit/credit transfer between explicit locations |
 | `document_attach` | Attach supplied `content_base64`, filename, type and optional metadata |
 | `inventory_create_items_bulk` | 1–100 creation commands in `records` |
-| `inventory_update_items_bulk` | 1–100 full replacements in `records` |
+| `inventory_update_items_bulk` | 1–100 partial updates in `records` |
 | `inventory_adjust_stock_bulk` | 1–100 `{ "item_id": ..., "adjustment": {...} }` commands |
+| `inventory_get_items` | 1–100 explicit IDs, ordered results with missing-ID errors |
+| `inventory_create_category`, `inventory_create_location` | Create with optional parent and retry key |
+| `inventory_update_category`, `inventory_update_location` | Patch name/parent; null parent moves to root |
+| `inventory_create_categories_bulk`, `inventory_create_locations_bulk` | Independent creates with per-record retry keys |
+| `inventory_delete_item`, `inventory_delete_items_bulk` | Irreversible deletion by explicit IDs; optional dry-run |
 
 Tool schemas/descriptions include permissions and mutation semantics. Unknown
 fields, missing required fields and wrong input types are rejected by the SDK.
 Domain failures return `isError` with a structured `error.code` and `error.message`.
-Invalid protocol calls/schema errors use SDK protocol errors. An item response
+Invalid tool arguments return structured `validation` tool errors; malformed
+JSON-RPC requests and unknown tools retain SDK protocol errors. An item response
 reports `omitted_scopes` if its optional balances or documents cannot be read.
 `inventory:read` still includes the item’s existing aggregate quantity.
 Hierarchy/document listing pages default to 50, maximum 100; those lists are
@@ -505,18 +520,138 @@ These capabilities work independently of MCP with the same bearer token:
 | POST | `/bulk/items/update` | `{ "records": [{ "id": 123, "item": { "name": "Bearing" } }] }` |
 | POST | `/bulk/stock/adjustments` | `{ "records": [{ "item_id": 123, "adjustment": { "location_id": 7, "quantity": 10 } }] }` |
 
-Bulk requests accept 1–100 records. The whole envelope must parse/validate before
-processing; unknown fields or malformed JSON reject it without changes. Business
-validation is per record. **Each record commits independently in input order**;
-failed records roll back, successful records remain committed. Responses contain
-indexed `results` with either `data` or `error`, plus `succeeded`, `failed` and a
-semantics explanation. This is not a whole-batch transaction. Inspect every result
-and retry only failed records after fixing them. Duplicate IDs in a batch are
-processed sequentially. Stock history records token IDs as well as acting users.
-Creates, stock operations and uploads are not idempotent. Following an uncertain
-network response, inspect state before retrying; exactly-once import/retry
-guarantees and idempotency keys are deferred. JSON REST bodies retain a 1 MiB cap,
-so split batches with unusually large notes/attributes into smaller requests.
+Bulk mutation requests accept 1–100 records (configurable downwards). The whole
+JSON envelope must parse before processing. Without an envelope retry key, each
+record commits independently in input order. Indexed `results` contain `data` or
+`error`, plus `succeeded` and `failed` counts; inspect every result. Duplicate IDs
+are processed sequentially. With a retry key, bulk item creation/stock adjustment
+commit all successful records and the complete response in one transaction;
+per-record savepoints roll back business failures. A crash before commit rolls
+back the batch. Retrying returns the original partial-success response; use new
+keys only for corrected failed records. Bulk deletion instead has all-or-nothing
+semantics described below. JSON REST bodies retain a 1 MiB cap.
+
+### Safe updates, retries and agent operations
+
+**Compatibility change:** MCP `inventory_update_item` and
+`inventory_update_items_bulk` now merge partial fields. Prefer
+`inventory_patch_item`; the old `item` argument remains accepted as an alias for
+`changes`, but never clears omitted fields. REST `PUT /items/{id}` and
+`POST /bulk/items/update` retain full-replacement behavior. Item responses now
+include `revision`; taxonomy writes require the new independent scopes.
+
+PATCH accepts `{ "changes": {...}, "expected_revision": 4 }`. Omitted fields
+are preserved. `category_id: null` clears the category; other item fields are
+non-nullable (use empty strings/lists to clear). `tags` replaces the complete list.
+`attributes` merges keys; a null value removes that key. Unknown/invalid fields
+are rejected. Positive `expected_revision` is optional on PATCH and full PUT;
+a stale value returns HTTP 409 `revision_conflict`. Read the latest revision
+before deciding how to resolve the conflict. Transactions preserve concurrent
+patches to unrelated fields. Use revisions to protect same-field edits. Revisions
+cover item metadata/archive, not stock or document attachments.
+
+Additional REST routes (all under `/api/v1`):
+
+| Method | Path | Body/purpose |
+| --- | --- | --- |
+| PATCH | `/items/{id}` | `changes`, optional `expected_revision` |
+| POST | `/bulk/items/patch` | `records` with `id`, `changes`, optional `expected_revision` |
+| PATCH | `/categories/{id}`, `/locations/{id}` | `changes` containing name and/or parent_id |
+| POST | `/bulk/categories/create`, `/bulk/locations/create` | `records` of name, optional parent_id/client_request_id |
+| GET | `/items/{id}/details` | Same related metadata as MCP single-item retrieval |
+| POST | `/items/batch-get` | `{ "ids": [12,25] }`; read operation |
+| DELETE | `/items/{id}?dry_run=true` | Single-item deletion preview; omit query to delete |
+| POST | `/bulk/items/delete` | `{ "ids": [12,25], "dry_run": true }` |
+
+Bulk reads return an ordered `results` array of `{id,data}` or `{id,error}`.
+Duplicate input IDs produce repeated results; unknown IDs have `not_found`.
+Related data uses bounded queries, including at most 20 document metadata records
+and a document count per item, never bytes. Optional stock/document information
+is omitted with `omitted_scopes` when permissions are absent.
+
+Taxonomy patches preserve omitted fields, reject unknown parents/cycles, and
+allow duplicate names as before. Bulk hierarchy creates commit independently;
+parent IDs must already exist. Their optional retry keys belong on each record.
+
+**Durable retries:** JSON creation, stock adjustments/transfers, bulk item
+creation and bulk stock adjustment accept `client_request_id`. MCP exposes the
+same field. Category/location creation also supports it. Generate a key once as
+`<current Unix seconds>:<unique suffix of at least 8 characters>` (maximum 128
+characters), persist it with the exact arguments, and reuse it after a timeout.
+For example, a shell can generate one with `printf '%s:%s' "$(date +%s)" "$(cat /proc/sys/kernel/random/uuid)"`.
+Keys are scoped to the acting user/token and operation. SQLite stores the mutation
+and response atomically; a matching retry returns the original result, even after
+a restart. Different arguments return HTTP 409 `idempotency_conflict`.
+
+Keys expire seven days after their embedded timestamp; timestamps over five
+minutes in the future are rejected. Expired keys always return HTTP 409
+`idempotency_expired`, even after pruning: inspect inventory/history before
+issuing a replacement key. Old rows are pruned on subsequent keyed mutations.
+Storage is capped at 10,000 results and 64 MiB of response bytes, with a 1 MiB
+per-response cap; capacity exhaustion rejects new writes without committing.
+Replays remain available while unexpired. A keyed bulk envelope cannot also
+contain per-record keys. Unkeyed item creation batches may use per-record keys.
+Standalone document attachment remains non-idempotent; inspect metadata/checksums
+after an uncertain upload. Failed standalone mutations are not recorded.
+
+**Permanent deletion** requires `inventory:delete`, independently of write/read
+scopes and bounded by the user's role. It is irreversible, unlike archive or
+stock consumption. Only explicit positive, distinct IDs are accepted, up to the
+configured bulk limit. Dry-run reports item, document and stock-history counts.
+Unknown IDs abort the whole batch; tombstones return `already_deleted` on retry.
+Deletion removes item metadata/tags/attributes, ledger/balances and document
+associations in one transaction. Audit events and tombstones remain; IDs are not
+reused. Backups and unexpired cached mutation responses are not erased.
+
+Physical files are queued durably and removed only after metadata commits, after
+checking that no live document references the storage key. Unlink failures leave
+`cleanup_pending: true` and are retried at startup and on later deletion calls
+(including an already-deleted ID). Each cleanup pass handles up to 1,000 files;
+large queues may need additional passes. There is no background cleanup worker.
+A filesystem failure cannot leave a live document pointing to a removed file.
+
+**Attribute filtering:** MCP `inventory_search` accepts `attribute_filters`; REST
+uses the same JSON array in the URL-encoded `attribute_filters` query parameter.
+Up to 20 conditions combine with AND before pagination and with all existing
+search/category/location/stock/archive filters. String values support `eq` and
+literal `contains`, case-sensitive. Numeric JSON values support `eq`, `gt`, `gte`,
+`lt`, `lte`. Attributes remain strings: numeric comparison considers only strings
+that are complete finite JSON numbers, using floating-point comparison. `"3"`
+and `"3e0"` qualify; `"3 W"`, `"03"` and prose do not. Boolean filtering and unit
+conversion are not supported by the existing string attribute model.
+
+Practical MCP `tools/call` examples (substitute real IDs and revisions):
+
+```json
+{"name":"inventory_patch_item","arguments":{"id":123,"expected_revision":4,"changes":{"manufacturer":"Texas Instruments","attributes":{"power_rating":"3","obsolete_key":null}}}}
+{"name":"inventory_create_category","arguments":{"name":"MOSFETs","parent_id":7}}
+{"name":"inventory_update_location","arguments":{"id":12,"changes":{"name":"Bench drawer","parent_id":null}}}
+{"name":"inventory_get_items","arguments":{"ids":[12,25,48]}}
+{"name":"inventory_search","arguments":{"query":"MOSFET","stock":"in","attribute_filters":[{"key":"power_rating","op":"gte","value":3}]}}
+{"name":"inventory_delete_items_bulk","arguments":{"ids":[12,25],"dry_run":true}}
+```
+
+For a retryable adjustment, call `inventory_adjust_stock` with
+`{"id":123,"location_id":7,"quantity":10,"client_request_id":"<generated key>"}`.
+Retry with the same key and arguments. After reviewing deletion preview counts,
+use `dry_run:false` with the same explicit IDs to perform deletion.
+
+**Write safeguards:** application flags `-max-bulk-records` (default 100, range
+1–100) and `-agent-writes-per-minute` (default 60, zero disables) configure limits.
+All direct REST and both MCP transports share each token's write budget at the
+application HTTP boundary; reads, including batch-get, remain available. Failed
+requests, retries and deletion previews consume budget. Limits return HTTP 429
+`rate_limited` with `Retry-After` and structured MCP tool errors. Rate windows are
+in memory and reset on restart; this is a single-instance safeguard, not a
+cross-process quota. Human sessions are exempt. Direct in-process service calls
+have bulk caps but no HTTP rate budget. Admins can revoke tokens in **Agent tokens**.
+
+Errors consistently expose `error.code`, `error.message`, and optional `details`.
+Existing `validation`, `unauthorized`, `forbidden`, `not_found` codes remain;
+revision/idempotency conflicts are distinct 409 errors. Internal SQL/path details
+are logged server-side rather than returned to clients. Ordinary MCP tool errors
+remain tool results, while transport authentication/protocol failures retain
+appropriate HTTP/JSON-RPC semantics.
 
 ### Manual testing and security
 
@@ -546,8 +681,10 @@ INVENTROSPECT_MCP_TEST_BINARY="$PWD/bin/inventrospect-mcp" \
 
 Normal tests exercise MCP via the SDK client, in-memory transports and the HTTP
 handler without opening sockets. They cover binary bytes, scopes, revocation,
-bulk failures, malformed requests, resource path rejection and no hard-delete
-tools, alongside the original human application suite. The optional subprocess
+bulk failures, malformed requests, resource path rejection, partial updates,
+revision conflicts, durable concurrent retries, taxonomy mutations, batch reads,
+explicit scoped deletion/cleanup, attribute filters and write limits, alongside
+the original human application suite. The optional subprocess
 test additionally checks the built stdio executable.
 
 Keep both listeners on loopback unless remote access is needed. For remote use,
@@ -562,13 +699,11 @@ There is no local-file read, shell, arbitrary SQL or arbitrary URL-fetch tool.
 
 The application has no autonomous AI, external retrieval/integrations, procurement,
 suppliers, BOMs, dashboards, deployment automation or proposal system. CSV import,
-document extraction/preview, custom-attribute filtering, full-text ranking,
-password reset, OAuth discovery and optimistic concurrency remain outside this
-session. The original UI still displays complete stock history; MCP uses the
+document extraction/preview, full-text ranking, password reset and OAuth
+discovery remain outside this session. The original UI still displays complete stock history; MCP uses the
 new pageable endpoint. No known failing workflow remains in the test suite, but
 these checks are not a security audit or production load test.
 
-Suggested next session: idempotency keys for stock/document/create operations
-and stale-edit protection, with retry/conflict tests. A later approval mechanism
-can stage these same explicit commands before dispatching through the existing
-services, without changing the deterministic inventory rules.
+Standalone document-upload idempotency and a periodic filesystem cleanup worker
+remain possible follow-ups. An approval mechanism could stage these explicit
+commands without changing the deterministic inventory rules.

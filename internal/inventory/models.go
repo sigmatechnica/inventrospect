@@ -3,18 +3,19 @@ package inventory
 import "fmt"
 
 type Error struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    string         `json:"code"`
+	Message string         `json:"message"`
+	Details map[string]any `json:"details,omitempty"`
 }
 
 func (e *Error) Error() string { return e.Message }
 func invalid(format string, args ...any) error {
-	return &Error{"validation", fmt.Sprintf(format, args...)}
+	return &Error{Code: "validation", Message: fmt.Sprintf(format, args...)}
 }
 
-var ErrForbidden = &Error{"forbidden", "You do not have permission to perform this operation"}
-var ErrNotFound = &Error{"not_found", "Record not found"}
-var ErrAuth = &Error{"unauthorized", "Invalid credentials or expired session"}
+var ErrForbidden = &Error{Code: "forbidden", Message: "You do not have permission to perform this operation"}
+var ErrNotFound = &Error{Code: "not_found", Message: "Record not found"}
+var ErrAuth = &Error{Code: "unauthorized", Message: "Invalid credentials or expired session"}
 
 type User struct {
 	Theme    string `json:"theme"`
@@ -32,6 +33,7 @@ type Actor struct {
 	Scopes  []string
 }
 type Item struct {
+	Revision     int64             `json:"revision"`
 	ID           int64             `json:"id"`
 	Name         string            `json:"name"`
 	Description  string            `json:"description"`
@@ -56,15 +58,16 @@ type Node struct {
 	Path     string `json:"path"`
 }
 type Search struct {
-	Sort       string
-	Direction  string
-	Query      string
-	CategoryID int64
-	LocationID int64
-	Stock      string
-	Archived   string
-	Limit      int
-	Offset     int
+	AttributeFilters []AttributeFilter
+	Sort             string
+	Direction        string
+	Query            string
+	CategoryID       int64
+	LocationID       int64
+	Stock            string
+	Archived         string
+	Limit            int
+	Offset           int
 }
 type Balance struct {
 	LocationID int64   `json:"location_id"`

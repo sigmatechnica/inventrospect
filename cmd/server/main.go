@@ -19,12 +19,17 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP listen address")
 	initAdmin := flag.Bool("init-admin", false, "Create the initial admin from INVENTROSPECT_ADMIN_USER and INVENTROSPECT_ADMIN_PASSWORD, then exit")
 	secure := flag.Bool("secure-cookies", false, "Require HTTPS for session cookies (use behind an HTTPS reverse proxy)")
+	maxBulk := flag.Int("max-bulk-records", 100, "Maximum records per mutating bulk request (1–100)")
+	writeRate := flag.Int("agent-writes-per-minute", 60, "Mutating requests per agent token per minute (0 disables)")
 	flag.Parse()
 	s, e := inventory.Open(*data)
 	if e != nil {
 		log.Fatal(e)
 	}
 	defer s.Close()
+	if e = s.ConfigureLimits(*maxBulk, *writeRate); e != nil {
+		log.Fatal(e)
+	}
 	ctx := context.Background()
 	if *initAdmin {
 		username := os.Getenv("INVENTROSPECT_ADMIN_USER")

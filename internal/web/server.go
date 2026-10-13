@@ -139,6 +139,12 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, inventory.Ac
 		if r.MultipartForm != nil {
 			defer r.MultipartForm.RemoveAll()
 		}
+		if r.Method != "GET" && r.Method != "HEAD" && r.URL.Path != "/api/v1/items/batch-get" {
+			if e = s.service.AllowAgentWrite(a); e != nil {
+				s.fail(w, r, e)
+				return
+			}
+		}
 		next(w, r, a)
 	}
 }
@@ -171,6 +177,9 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, e error) {
 			status = 404
 		case "rate_limited":
 			status = 429
+			w.Header().Set("Retry-After", "60")
+		case "revision_conflict", "idempotency_conflict", "idempotency_expired":
+			status = 409
 		case "method_not_allowed":
 			status = 405
 		}
@@ -196,7 +205,12 @@ func decode(r *http.Request, v any) error {
 	d := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1024*1024))
 	d.DisallowUnknownFields()
 	if e = d.Decode(v); e != nil {
-		return &inventory.Error{Code: "validation", Message: "Invalid JSON: " + e.Error()}
+		problem := &inventory.Error{Code: "validation", Message: "Invalid JSON body, field type or unknown field"}
+		var typed *json.UnmarshalTypeError
+		if errors.As(e, &typed) {
+			problem.Details = map[string]any{"field": typed.Field}
+		}
+		return problem
 	}
 	if e = d.Decode(new(any)); e != io.EOF {
 		return &inventory.Error{Code: "validation", Message: "Expected one JSON object"}
@@ -303,6 +317,16 @@ func methodError() error {
 func searchParams(r *http.Request) (inventory.Search, error) {
 	q := r.URL.Query()
 	f := inventory.Search{Query: q.Get("q"), Stock: q.Get("stock"), Archived: q.Get("archived"), Sort: q.Get("sort"), Direction: q.Get("direction")}
+	if raw := q.Get("attribute_filters"); raw != "" {
+		d := json.NewDecoder(strings.NewReader(raw))
+		d.DisallowUnknownFields()
+		if e := d.Decode(&f.AttributeFilters); e != nil {
+			return f, &inventory.Error{Code: "validation", Message: "Invalid attribute_filters array"}
+		}
+		if e := d.Decode(new(any)); e != io.EOF {
+			return f, &inventory.Error{Code: "validation", Message: "Expected one attribute_filters array"}
+		}
+	}
 	var e error
 	for key, dest := range map[string]*int64{"category_id": &f.CategoryID, "location_id": &f.LocationID} {
 		if q.Get(key) != "" {

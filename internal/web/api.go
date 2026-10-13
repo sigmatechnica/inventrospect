@@ -27,6 +27,19 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 	p = p[2:]
 	ctx := r.Context()
 	method := r.Method
+	if len(p) == 2 && p[0] == "items" && p[1] == "batch-get" {
+		if method != "POST" {
+			return nil, 0, methodError()
+		}
+		var in struct {
+			IDs []int64 `json:"ids"`
+		}
+		if e := decode(r, &in); e != nil {
+			return nil, 0, e
+		}
+		v, e := s.service.GetItems(ctx, a, in.IDs)
+		return v, 200, e
+	}
 	if len(p) == 2 && p[0] == "agent" && p[1] == "me" {
 		if method != "GET" {
 			return nil, 0, methodError()
@@ -41,14 +54,40 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 			return nil, 0, methodError()
 		}
 		switch p[1] + "/" + p[2] {
-		case "items/create":
+		case "items/delete":
+			var in inventory.DeleteInput
+			if e := decode(r, &in); e != nil {
+				return nil, 0, e
+			}
+			v, e := s.service.DeleteItems(ctx, a, in)
+			return v, 200, e
+		case "categories/create", "locations/create":
 			var in struct {
-				Records []inventory.CreateItemInput `json:"records"`
+				Records []inventory.NodeInput `json:"records"`
 			}
 			if e := decode(r, &in); e != nil {
 				return nil, 0, e
 			}
-			v, e := s.service.BulkCreateItems(ctx, a, in.Records)
+			v, e := s.service.BulkCreateNodes(ctx, a, p[1], in.Records)
+			return v, 200, e
+		case "items/create":
+			var in struct {
+				Records         []inventory.CreateItemInput `json:"records"`
+				ClientRequestID string                      `json:"client_request_id"`
+			}
+			if e := decode(r, &in); e != nil {
+				return nil, 0, e
+			}
+			v, e := s.service.BulkCreateItems(ctx, a, in.Records, in.ClientRequestID)
+			return v, 200, e
+		case "items/patch":
+			var in struct {
+				Records []inventory.PatchItemInput `json:"records"`
+			}
+			if e := decode(r, &in); e != nil {
+				return nil, 0, e
+			}
+			v, e := s.service.BulkPatchItems(ctx, a, in.Records)
 			return v, 200, e
 		case "items/update":
 			var in struct {
@@ -61,12 +100,13 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 			return v, 200, e
 		case "stock/adjustments":
 			var in struct {
-				Records []inventory.AdjustStockInput `json:"records"`
+				Records         []inventory.AdjustStockInput `json:"records"`
+				ClientRequestID string                       `json:"client_request_id"`
 			}
 			if e := decode(r, &in); e != nil {
 				return nil, 0, e
 			}
-			v, e := s.service.BulkAdjustStock(ctx, a, in.Records)
+			v, e := s.service.BulkAdjustStock(ctx, a, in.Records, in.ClientRequestID)
 			return v, 200, e
 		}
 		return nil, 0, inventory.ErrNotFound
@@ -158,12 +198,13 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 				}
 				var in struct {
 					itemInput
-					InitialStock inventory.Adjustment `json:"initial_stock"`
+					InitialStock    inventory.Adjustment `json:"initial_stock"`
+					ClientRequestID string               `json:"client_request_id"`
 				}
 				if e := decode(r, &in); e != nil {
 					return nil, 0, e
 				}
-				i, e := s.service.CreateItem(ctx, a, in.Item(0), in.InitialStock, nil)
+				i, e := s.service.CreateItem(ctx, a, in.Item(0), in.InitialStock, nil, in.ClientRequestID)
 				if e == nil {
 					w.Header().Set("Location", "/api/v1"+itemURL(i.ID))
 				}
@@ -176,14 +217,11 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 				return nodes, 200, e
 			}
 			if method == "POST" {
-				var in struct {
-					Name     string `json:"name"`
-					ParentID *int64 `json:"parent_id"`
-				}
+				var in inventory.NodeInput
 				if e := decode(r, &in); e != nil {
 					return nil, 0, e
 				}
-				n, e := s.service.SaveNode(ctx, a, p[0], inventory.Node{Name: in.Name, ParentID: in.ParentID})
+				n, e := s.service.SaveNode(ctx, a, p[0], inventory.Node{Name: in.Name, ParentID: in.ParentID}, in.ClientRequestID)
 				return n, 201, e
 			}
 			return nil, 0, methodError()
@@ -228,8 +266,28 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 	if len(p) == 2 {
 		switch p[0] {
 		case "items":
+			if method == "DELETE" {
+				dry := false
+				if raw := r.URL.Query().Get("dry_run"); raw != "" {
+					var err error
+					dry, err = strconv.ParseBool(raw)
+					if err != nil {
+						return nil, 0, &inventory.Error{Code: "validation", Message: "dry_run must be true or false"}
+					}
+				}
+				v, e := s.service.DeleteItems(ctx, a, inventory.DeleteInput{IDs: []int64{id}, DryRun: dry})
+				return v, 200, e
+			}
 			if method == "GET" {
 				i, e := s.service.Item(ctx, a, id)
+				return i, 200, e
+			}
+			if method == "PATCH" {
+				var in inventory.PatchInput
+				if e = decode(r, &in); e != nil {
+					return nil, 0, e
+				}
+				i, e := s.service.PatchItem(ctx, a, id, in)
 				return i, 200, e
 			}
 			if method == "PUT" {
@@ -242,6 +300,17 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 			}
 			return nil, 0, methodError()
 		case "categories", "locations":
+			if method == "PATCH" {
+				var in struct {
+					Changes map[string]any `json:"changes"`
+				}
+				if e = decode(r, &in); e != nil {
+					return nil, 0, e
+				}
+				v, e := s.service.PatchNode(ctx, a, p[0], id, in.Changes)
+				return v, 200, e
+			}
+
 			if method == "DELETE" {
 				e := s.service.DeleteNode(ctx, a, p[0], id)
 				return map[string]bool{"deleted": true}, 200, e
@@ -280,6 +349,18 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 		}
 		if p[0] == "items" {
 			switch p[2] {
+			case "details":
+				if method != "GET" {
+					return nil, 0, methodError()
+				}
+				v, e := s.service.GetItems(ctx, a, []int64{id})
+				if e != nil {
+					return nil, 0, e
+				}
+				if v.Results[0].Error != nil {
+					return nil, 0, v.Results[0].Error
+				}
+				return v.Results[0].Data, 200, nil
 			case "archive":
 				if method != "PUT" {
 					return nil, 0, methodError()
@@ -353,18 +434,24 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 		}
 		switch p[3] {
 		case "adjustments":
-			var in inventory.Adjustment
+			var in struct {
+				inventory.Adjustment
+				ClientRequestID string `json:"client_request_id"`
+			}
 			if e = decode(r, &in); e != nil {
 				return nil, 0, e
 			}
-			m, e := s.service.AdjustStock(ctx, a, id, in)
+			m, e := s.service.AdjustStock(ctx, a, id, in.Adjustment, in.ClientRequestID)
 			return m, 201, e
 		case "transfers":
-			var in inventory.Transfer
+			var in struct {
+				inventory.Transfer
+				ClientRequestID string `json:"client_request_id"`
+			}
 			if e = decode(r, &in); e != nil {
 				return nil, 0, e
 			}
-			m, e := s.service.MoveStock(ctx, a, id, in)
+			m, e := s.service.MoveStock(ctx, a, id, in.Transfer, in.ClientRequestID)
 			return m, 201, e
 		}
 	}

@@ -102,16 +102,21 @@ func movement(ctx context.Context, tx *sql.Tx, a Actor, item, location int64, q 
 		id := a.TokenID
 		m.TokenID = &id
 	}
-	r, e := tx.ExecContext(ctx, `INSERT INTO stock_movements(item_id,location_id,quantity,reason,transfer_id,actor_id,created_at,token_id) VALUES(?,?,?,?,?,?,?,?)`, item, location, int64(math.Round(q*1e6)), reason, transfer, a.UserID, at, tokenID(a))
-	if e == nil {
-		m.ID, e = r.LastInsertId()
+	var e error
+	m.ID, e = nextResourceID(ctx, tx, "stock_movements")
+	if e != nil {
+		return m, e
 	}
+	_, e = tx.ExecContext(ctx, `INSERT INTO stock_movements(id,item_id,location_id,quantity,reason,transfer_id,actor_id,created_at,token_id) VALUES(?,?,?,?,?,?,?,?,?)`, m.ID, item, location, int64(math.Round(q*1e6)), reason, transfer, a.UserID, at, tokenID(a))
 	return m, e
 }
-func (s *Service) AdjustStock(ctx context.Context, a Actor, id int64, in Adjustment) (Movement, error) {
+func (s *Service) AdjustStock(ctx context.Context, a Actor, id int64, in Adjustment, keys ...string) (Movement, error) {
 	if e := s.authorize(ctx, a, "stock:write"); e != nil {
 		return Movement{}, e
 	}
+	return mutate(s, ctx, a, "adjust_stock", requestKey(keys), []any{id, in}, func(tx *sql.Tx) (Movement, error) { return adjustStockTx(ctx, tx, a, id, in) })
+}
+func adjustStockTx(ctx context.Context, tx *sql.Tx, a Actor, id int64, in Adjustment) (Movement, error) {
 	in.Reason = clean(in.Reason)
 	if in.Reason == "" {
 		in.Reason = "Stock adjustment"
@@ -120,11 +125,7 @@ func (s *Service) AdjustStock(ctx context.Context, a Actor, id int64, in Adjustm
 	if !valid || len(in.Reason) > 2000 {
 		return Movement{}, invalid("A finite nonzero quantity (absolute maximum 1e9, whole numbers only) is required; an optional reason must be at most 2000 characters")
 	}
-	tx, e := s.db.BeginTx(ctx, nil)
-	if e != nil {
-		return Movement{}, e
-	}
-	defer tx.Rollback()
+	var e error
 	if e = stockItem(ctx, tx, id); e != nil {
 		return Movement{}, e
 	}
@@ -149,12 +150,15 @@ func (s *Service) AdjustStock(ctx context.Context, a Actor, id int64, in Adjustm
 	if e != nil {
 		return m, e
 	}
-	return m, tx.Commit()
+	return m, nil
 }
-func (s *Service) MoveStock(ctx context.Context, a Actor, id int64, in Transfer) ([]Movement, error) {
+func (s *Service) MoveStock(ctx context.Context, a Actor, id int64, in Transfer, keys ...string) ([]Movement, error) {
 	if e := s.authorize(ctx, a, "stock:write"); e != nil {
 		return nil, e
 	}
+	return mutate(s, ctx, a, "move_stock", requestKey(keys), []any{id, in}, func(tx *sql.Tx) ([]Movement, error) { return moveStockTx(ctx, tx, a, id, in) })
+}
+func moveStockTx(ctx context.Context, tx *sql.Tx, a Actor, id int64, in Transfer) ([]Movement, error) {
 	in.Reason = clean(in.Reason)
 	if in.Reason == "" {
 		in.Reason = "Stock transfer"
@@ -163,11 +167,7 @@ func (s *Service) MoveStock(ctx context.Context, a Actor, id int64, in Transfer)
 	if !valid || in.Quantity <= 0 || in.FromLocationID == in.ToLocationID || len(in.Reason) > 2000 {
 		return nil, invalid("Transfer requires different locations, a positive finite quantity (maximum 1e9, whole numbers only) and an optional reason of at most 2000 characters")
 	}
-	tx, e := s.db.BeginTx(ctx, nil)
-	if e != nil {
-		return nil, e
-	}
-	defer tx.Rollback()
+	var e error
 	if e = stockItem(ctx, tx, id); e != nil {
 		return nil, e
 	}
@@ -193,5 +193,5 @@ func (s *Service) MoveStock(ctx context.Context, a Actor, id int64, in Transfer)
 	if e != nil {
 		return nil, e
 	}
-	return []Movement{debit, credit}, tx.Commit()
+	return []Movement{debit, credit}, nil
 }

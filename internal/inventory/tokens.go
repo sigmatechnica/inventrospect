@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-var TokenScopes = []string{"inventory:read", "inventory:write", "stock:read", "stock:write", "documents:read", "documents:write"}
+var TokenScopes = []string{"inventory:read", "inventory:write", "categories:write", "locations:write", "inventory:delete", "stock:read", "stock:write", "documents:read", "documents:write"}
 
 type APIToken struct {
 	ID         int64    `json:"id"`
@@ -86,7 +86,7 @@ func (s *Service) CreateToken(ctx context.Context, a Actor, in TokenInput) (Toke
 		return TokenCreated{}, e
 	}
 	for _, scope := range scopes {
-		if role == "viewer" && strings.HasSuffix(scope, ":write") {
+		if role == "viewer" && (strings.HasSuffix(scope, ":write") || scope == "inventory:delete") {
 			return TokenCreated{}, invalid("Viewer-owned tokens cannot have write scopes")
 		}
 	}

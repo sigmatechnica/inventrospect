@@ -8,9 +8,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -25,9 +27,15 @@ var migration2 string
 //go:embed migration3.sql
 var migration3 string
 
+//go:embed migration4.sql
+var migration4 string
+
 type Service struct {
-	db      *sql.DB
-	dataDir string
+	db                       *sql.DB
+	dataDir                  string
+	limitsMu                 sync.Mutex
+	maxBulk, writesPerMinute int
+	writeWindows             map[int64]writeWindow
 }
 
 func Open(dataDir string) (*Service, error) {
@@ -44,7 +52,7 @@ func Open(dataDir string) (*Service, error) {
 	}
 	// One connection serializes writes and guarantees connection-local SQLite settings.
 	db.SetMaxOpenConns(1)
-	s := &Service{db: db, dataDir: abs}
+	s := &Service{db: db, dataDir: abs, maxBulk: 100, writesPerMinute: 60, writeWindows: map[int64]writeWindow{}}
 	if _, err = db.Exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY);`); err != nil {
 		db.Close()
 		return nil, err
@@ -54,7 +62,7 @@ func Open(dataDir string) (*Service, error) {
 		db.Close()
 		return nil, err
 	}
-	migrations := []string{schema, migration2, migration3}
+	migrations := []string{schema, migration2, migration3, migration4}
 	if version > len(migrations) {
 		db.Close()
 		return nil, errors.New("database schema is newer than this executable")
@@ -82,6 +90,9 @@ func Open(dataDir string) (*Service, error) {
 		db.Close()
 		return nil, err
 	}
+	if e := s.cleanupFiles(context.Background()); e != nil {
+		log.Printf("Document cleanup pending: %v", e)
+	}
 	return s, nil
 }
 func (s *Service) Close() error { return s.db.Close() }
@@ -106,7 +117,7 @@ func (s *Service) authorize(ctx context.Context, a Actor, scope string) error {
 	if scope == "admin" && role != "admin" {
 		return ErrForbidden
 	}
-	if (scope == "write" || strings.HasSuffix(scope, ":write")) && role == "viewer" {
+	if (scope == "write" || strings.HasSuffix(scope, ":write") || scope == "inventory:delete") && role == "viewer" {
 		return ErrForbidden
 	}
 	if a.TokenID != 0 {
@@ -148,6 +159,17 @@ func audit(ctx context.Context, tx *sql.Tx, a Actor, action, resource string, id
 	return e
 }
 func clean(s string) string { return strings.TrimSpace(s) }
+
+// These resource IDs must not be reused after permanent item deletion: old
+// document URIs, ledger cursors and audit records continue to refer to old IDs.
+func nextResourceID(ctx context.Context, tx *sql.Tx, kind string) (int64, error) {
+	if kind != "documents" && kind != "stock_movements" {
+		return 0, invalid("Unknown resource sequence")
+	}
+	var id int64
+	e := tx.QueryRowContext(ctx, `UPDATE resource_sequences SET next_id=MAX(next_id,COALESCE((SELECT MAX(id)+1 FROM `+kind+`),1))+1 WHERE kind=? RETURNING next_id-1`, kind).Scan(&id)
+	return id, e
+}
 func exists(ctx context.Context, tx *sql.Tx, table string, id int64) error {
 	var n int
 	e := tx.QueryRowContext(ctx, "SELECT 1 FROM "+table+" WHERE id=?", id).Scan(&n)

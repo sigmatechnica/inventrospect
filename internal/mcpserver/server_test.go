@@ -116,11 +116,11 @@ func TestMCPDiscoverySearchItemAndResources(t *testing.T) {
 	f := setup(t, inventory.TokenScopes...)
 	cs := connect(t, f.b)
 	tools, e := cs.ListTools(context.Background(), nil)
-	if e != nil || len(tools.Tools) != 17 {
+	if e != nil || len(tools.Tools) != 27 {
 		t.Fatal(tools, e)
 	}
 	for _, tool := range tools.Tools {
-		if strings.Contains(tool.Name, "delete") || strings.Contains(tool.Name, "sql") {
+		if strings.Contains(tool.Name, "sql") {
 			t.Fatal("destructive tool", tool.Name)
 		}
 		if tool.Description == "" {
@@ -155,7 +155,7 @@ func TestMCPDiscoverySearchItemAndResources(t *testing.T) {
 			t.Fatal("malformed input accepted", args)
 		}
 	}
-	if _, e = cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "inventory_delete_item", Arguments: map[string]any{"id": 1}}); e == nil {
+	if _, e = cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "inventory_run_sql", Arguments: map[string]any{"id": 1}}); e == nil {
 		t.Fatal("unknown tool accepted")
 	}
 	for _, uri := range []string{"file:///etc/passwd", "inventory://documents/../../etc/passwd", "inventory://documents/1?path=/etc/passwd"} {

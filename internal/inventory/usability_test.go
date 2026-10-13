@@ -116,8 +116,10 @@ func TestDeleteNodesAndDefaultLocation(t *testing.T) {
 	i := mustItem(t, s, a)
 	i.CategoryID = &category.ID
 	i.Archived = true
-	if _, e := s.SaveItem(testCtx, a, i); e != nil {
-		t.Fatal(e)
+	var saveErr error
+	i, saveErr = s.SaveItem(testCtx, a, i)
+	if saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	requireCode(t, s.DeleteNode(testCtx, a, "categories", category.ID), "validation")
 	i.CategoryID = nil

@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"context"
+	"database/sql"
 	"io"
 )
 
@@ -15,7 +16,7 @@ type DocumentUpload struct {
 
 // CreateItem saves the item, initial ledger entry and document metadata atomically.
 // On failure, newly prepared files are removed; no partial item is left behind.
-func (s *Service) CreateItem(ctx context.Context, a Actor, i Item, initial Adjustment, uploads []DocumentUpload) (Item, error) {
+func (s *Service) CreateItem(ctx context.Context, a Actor, i Item, initial Adjustment, uploads []DocumentUpload, keys ...string) (Item, error) {
 	if e := s.authorize(ctx, a, "inventory:write"); e != nil {
 		return Item{}, e
 	}
@@ -64,12 +65,33 @@ func (s *Service) CreateItem(ctx context.Context, a Actor, i Item, initial Adjus
 			return Item{}, invalid("Initial uploads must total at most 100 MiB")
 		}
 	}
-	tx, e := s.db.BeginTx(ctx, nil)
-	if e != nil {
-		return Item{}, e
+	fingerprints := append([]Document(nil), prepared...)
+	for j := range fingerprints {
+		fingerprints[j].UploadedAt = ""
+		fingerprints[j].UploadedBy = 0
 	}
-	defer tx.Rollback()
-	i, e = saveItem(ctx, tx, a, i)
+	usedPrepared := false
+	out, e := mutate(s, ctx, a, "create_item", requestKey(keys), []any{i, initial, fingerprints}, func(tx *sql.Tx) (Item, error) {
+		usedPrepared = true
+		return createItemTx(ctx, tx, a, i, initial, prepared)
+	})
+	// A replay has no references to the newly prepared duplicate files.
+	committed = e == nil && usedPrepared
+	return out, e
+}
+func createItemTx(ctx context.Context, tx *sql.Tx, a Actor, i Item, initial Adjustment, prepared []Document) (Item, error) {
+	if i.ID != 0 {
+		return Item{}, invalid("A new item must not have an ID")
+	}
+	if initial.Quantity != 0 {
+		if _, ok := quantityUnits(initial.Quantity); !ok || initial.Quantity < 0 {
+			return Item{}, invalid("Initial quantity must be a nonnegative whole number")
+		}
+	}
+	if i.Archived && initial.Quantity > 0 {
+		return Item{}, invalid("An archived item cannot have initial stock")
+	}
+	i, e := saveItem(ctx, tx, a, i)
 	if e != nil {
 		return Item{}, e
 	}
@@ -105,9 +127,5 @@ func (s *Service) CreateItem(ctx context.Context, a Actor, i Item, initial Adjus
 			return Item{}, e
 		}
 	}
-	if e = tx.Commit(); e != nil {
-		return Item{}, e
-	}
-	committed = true
-	return s.itemRecord(ctx, i.ID)
+	return scanItem(tx.QueryRowContext(ctx, "SELECT "+itemColumns+" FROM items i WHERE i.id=?", i.ID))
 }

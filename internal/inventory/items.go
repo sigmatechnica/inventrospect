@@ -7,14 +7,14 @@ import (
 	"strings"
 )
 
-const itemColumns = `i.id,i.name,i.description,i.category_id,i.manufacturer,i.mpn,i.condition,i.notes,i.tags,i.attributes,i.archived,i.created_at,i.updated_at,i.created_by,i.updated_by,COALESCE((SELECT SUM(quantity)/1000000.0 FROM stock_movements WHERE item_id=i.id),0)`
+const itemColumns = `i.id,i.name,i.description,i.category_id,i.manufacturer,i.mpn,i.condition,i.notes,i.tags,i.attributes,i.archived,i.created_at,i.updated_at,i.created_by,i.updated_by,COALESCE((SELECT SUM(quantity)/1000000.0 FROM stock_movements WHERE item_id=i.id),0),i.revision`
 
 type scanner interface{ Scan(...any) error }
 
 func scanItem(row scanner) (Item, error) {
 	var i Item
 	var tags, attrs string
-	e := row.Scan(&i.ID, &i.Name, &i.Description, &i.CategoryID, &i.Manufacturer, &i.MPN, &i.Condition, &i.Notes, &tags, &attrs, &i.Archived, &i.CreatedAt, &i.UpdatedAt, &i.CreatedBy, &i.UpdatedBy, &i.Quantity)
+	e := row.Scan(&i.ID, &i.Name, &i.Description, &i.CategoryID, &i.Manufacturer, &i.MPN, &i.Condition, &i.Notes, &tags, &attrs, &i.Archived, &i.CreatedAt, &i.UpdatedAt, &i.CreatedBy, &i.UpdatedBy, &i.Quantity, &i.Revision)
 	if e == sql.ErrNoRows {
 		return i, ErrNotFound
 	}
@@ -67,6 +67,12 @@ func searchQuery(f Search) (string, []any, error) {
 	}
 	query := " FROM items i WHERE 1=1"
 	args := []any{}
+	attrSQL, attrArgs, e := attributeSQL(f.AttributeFilters)
+	if e != nil {
+		return "", nil, e
+	}
+	query += attrSQL
+	args = append(args, attrArgs...)
 	if f.Query != "" {
 		query += ` AND (i.name LIKE ? ESCAPE '\' OR i.description LIKE ? ESCAPE '\' OR i.manufacturer LIKE ? ESCAPE '\' OR i.mpn LIKE ? ESCAPE '\' OR i.notes LIKE ? ESCAPE '\' OR EXISTS(SELECT 1 FROM json_each(i.tags) WHERE value LIKE ? ESCAPE '\'))`
 		q := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(f.Query) + "%"
@@ -137,14 +143,21 @@ func (s *Service) SaveItem(ctx context.Context, a Actor, i Item) (Item, error) {
 	if e != nil {
 		return i, e
 	}
+	i, e = scanItem(tx.QueryRowContext(ctx, "SELECT "+itemColumns+" FROM items i WHERE i.id=?", i.ID))
+	if e != nil {
+		return i, e
+	}
 	if e = tx.Commit(); e != nil {
 		return i, e
 	}
-	return s.itemRecord(ctx, i.ID)
+	return i, nil
 }
 
 // Shared by ordinary edits and atomic creation with initial stock/documents.
 func saveItem(ctx context.Context, tx *sql.Tx, a Actor, i Item) (Item, error) {
+	if i.Revision < 0 {
+		return i, invalid("expected_revision must be positive")
+	}
 	i.Name = clean(i.Name)
 	if i.Name == "" || len(i.Name) > 300 {
 		return i, invalid("Item name must be 1–300 characters")
@@ -189,12 +202,23 @@ func saveItem(ctx context.Context, tx *sql.Tx, a Actor, i Item) (Item, error) {
 	if i.ID == 0 {
 		i.CreatedAt = i.UpdatedAt
 		i.CreatedBy = a.UserID
-		r, err := tx.ExecContext(ctx, `INSERT INTO items(name,description,category_id,manufacturer,mpn,condition,notes,tags,attributes,archived,created_at,updated_at,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, i.Name, i.Description, i.CategoryID, i.Manufacturer, i.MPN, i.Condition, i.Notes, string(tagJSON), string(attrJSON), i.Archived, i.CreatedAt, i.UpdatedAt, i.CreatedBy, i.UpdatedBy)
-		e = err
-		if e == nil {
-			i.ID, e = r.LastInsertId()
+		e = tx.QueryRowContext(ctx, `UPDATE item_sequence SET next_id=MAX(next_id,COALESCE((SELECT MAX(id)+1 FROM items),1))+1 WHERE id=1 RETURNING next_id-1`).Scan(&i.ID)
+		if e != nil {
+			return i, e
 		}
+		_, e = tx.ExecContext(ctx, `INSERT INTO items(id,name,description,category_id,manufacturer,mpn,condition,notes,tags,attributes,archived,created_at,updated_at,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, i.ID, i.Name, i.Description, i.CategoryID, i.Manufacturer, i.MPN, i.Condition, i.Notes, string(tagJSON), string(attrJSON), i.Archived, i.CreatedAt, i.UpdatedAt, i.CreatedBy, i.UpdatedBy)
 	} else {
+		if i.Revision > 0 {
+			var revision int64
+			if e = tx.QueryRowContext(ctx, `SELECT revision FROM items WHERE id=?`, i.ID).Scan(&revision); e == sql.ErrNoRows {
+				return i, ErrNotFound
+			} else if e != nil {
+				return i, e
+			}
+			if revision != i.Revision {
+				return i, &Error{Code: "revision_conflict", Message: "Item changed; read its current revision and retry"}
+			}
+		}
 		e = tx.QueryRowContext(ctx, `SELECT created_at,created_by FROM items WHERE id=?`, i.ID).Scan(&i.CreatedAt, &i.CreatedBy)
 		if e == sql.ErrNoRows {
 			return i, ErrNotFound
@@ -202,7 +226,7 @@ func saveItem(ctx context.Context, tx *sql.Tx, a Actor, i Item) (Item, error) {
 		if e != nil {
 			return i, e
 		}
-		_, e = tx.ExecContext(ctx, `UPDATE items SET name=?,description=?,category_id=?,manufacturer=?,mpn=?,condition=?,notes=?,tags=?,attributes=?,archived=?,updated_at=?,updated_by=? WHERE id=?`, i.Name, i.Description, i.CategoryID, i.Manufacturer, i.MPN, i.Condition, i.Notes, string(tagJSON), string(attrJSON), i.Archived, i.UpdatedAt, i.UpdatedBy, i.ID)
+		_, e = tx.ExecContext(ctx, `UPDATE items SET name=?,description=?,category_id=?,manufacturer=?,mpn=?,condition=?,notes=?,tags=?,attributes=?,archived=?,updated_at=?,updated_by=?,revision=revision+1 WHERE id=?`, i.Name, i.Description, i.CategoryID, i.Manufacturer, i.MPN, i.Condition, i.Notes, string(tagJSON), string(attrJSON), i.Archived, i.UpdatedAt, i.UpdatedBy, i.ID)
 	}
 	if e != nil {
 		return i, e
@@ -221,7 +245,7 @@ func (s *Service) ArchiveItem(ctx context.Context, a Actor, id int64, archived b
 		return Item{}, e
 	}
 	defer tx.Rollback()
-	r, e := tx.ExecContext(ctx, `UPDATE items SET archived=?,updated_at=?,updated_by=? WHERE id=?`, archived, now(), a.UserID, id)
+	r, e := tx.ExecContext(ctx, `UPDATE items SET archived=?,updated_at=?,updated_by=?,revision=revision+1 WHERE id=?`, archived, now(), a.UserID, id)
 	if e != nil {
 		return Item{}, e
 	}
@@ -232,8 +256,12 @@ func (s *Service) ArchiveItem(ctx context.Context, a Actor, id int64, archived b
 	if e = audit(ctx, tx, a, "archive", "item", id); e != nil {
 		return Item{}, e
 	}
+	i, e := scanItem(tx.QueryRowContext(ctx, "SELECT "+itemColumns+" FROM items i WHERE i.id=?", id))
+	if e != nil {
+		return Item{}, e
+	}
 	if e = tx.Commit(); e != nil {
 		return Item{}, e
 	}
-	return s.itemRecord(ctx, id)
+	return i, nil
 }
