@@ -6,7 +6,12 @@ file storage. No frontend build step or external service is required at runtime.
 
 ## Build and run
 
-Prerequisite: **Go 1.25 or newer**. Dependencies are fetched on the first build.
+Prerequisite: **Go 1.27.2 or newer**. The minimum patch version is enforced by
+`go.mod`; an older compiler fails rather than silently building. With Go's
+`GOTOOLCHAIN=auto`, the required toolchain is downloaded automatically. If your
+host sets `GOTOOLCHAIN=local`, install the required release or explicitly set
+`GOTOOLCHAIN=go1.27.2` for development commands. Dependencies are fetched on the
+first build. Release availability was verified against the [official downloads](https://go.dev/dl/).
 The pure-Go SQLite driver requires no C compiler or separately installed SQLite.
 
 ```sh
@@ -37,8 +42,11 @@ go run ./cmd/server -data ./data
 For LAN access, use `-addr 0.0.0.0:8080`. When serving through an HTTPS reverse
 proxy, add `-secure-cookies` and preserve the original Host header. The server
 speaks HTTP; do not send credentials across an untrusted network without TLS.
-Only one server process should own a data directory. SIGINT/SIGTERM shuts down
-HTTP gracefully before closing SQLite.
+Only one server process should own a data directory. Both HTTP executables stop
+accepting connections on SIGINT/SIGTERM and wait for active requests to finish
+before the application closes SQLite. `-shutdown-timeout` defaults to 15 seconds.
+If draining times out, active connections are closed, the failure is logged and
+the process exits unsuccessfully. Stdio MCP retains its context-based shutdown.
 
 Start by creating locations and categories, then an item. Record its initial
 stock as an adjustment with an explanatory reason. There is no sample data
@@ -67,10 +75,18 @@ inserted into a real inventory; automated tests build disposable fixtures.
 - CSV export containing all inventory items, including archived items.
 
 Viewers can read, download and export. Editors can also modify inventory,
-hierarchies, stock and documents. Only admins can manage users. The last active
+hierarchies, stock and documents, including archiving. Only admins can manage
+users/tokens or permanently delete inventory. A scoped deletion token must also
+belong to an active admin; editor-owned tokens cannot bypass this restriction. The last active
 admin cannot be disabled or demoted. Changing a user revokes their sessions.
 Passwords are bcrypt hashes; sessions last 24 hours and are stored as SHA256
-hashes. Login attempts are limited to 30 per minute across this server instance.
+hashes. Login attempts (including successful ones) are limited independently to
+10 per normalized username and 30 per directly connected IP per minute. Correct
+credentials return 429 while that account/IP is throttled; unrelated accounts
+from other IPs remain available. Limits apply equally to nonexistent usernames.
+Inactive entries expire after one minute; state is capped at 4,096 entries with
+oldest-entry eviction. Forwarded headers are not trusted. Behind a reverse proxy,
+clients share its IP allowance; trusted-proxy configuration is not implemented.
 
 ## Architecture
 
@@ -106,6 +122,7 @@ internal/inventory/     domain types, authorization, validation, SQLite services
   migration2.sql        user theme and shared default location
   migration3.sql        hashed agent tokens and token audit attribution
   migration4.sql        revisions, durable retries, deletion cleanup and stable IDs
+  migration5.sql        token limits, deletion audit details and principal quota index
   *_test.go             domain and persistence tests
 internal/mcpserver/     optional MCP adapter over REST, using the official Go SDK
 cmd/mcp/                stdio or Streamable HTTP adapter lifecycle
@@ -146,8 +163,8 @@ cannot receive stock mutations until restored.
 
 Item/user/hierarchy/document mutations record actor/time audit events; stock
 entries carry the actor and timestamp directly. Audit events identify the action
-and resource, but are not a full before/after revision store. Item patches merge supplied fields transactionally; an optional expected revision
-rejects stale writes. Unconditional updates to the same field remain last-write-wins.
+and resource, but are not a full before/after revision store. Item edits require a positive expected revision and reject stale writes. Patches
+merge supplied fields transactionally, preserving omitted fields.
 Stock updates are transactional. Files are immutable through
 the public interface and are never fetched from source URLs. Uploaded content
 is always downloaded as an attachment with `nosniff`, never rendered as HTML.
@@ -170,7 +187,7 @@ audit fields and timestamps are not accepted on item writes.
 | GET, PUT | `/settings` | Read/set shared `{ "default_location_id": 1 }`; null clears it |
 | GET, POST | `/items` | Search/list, create |
 | GET, PUT | `/items/{id}` | Read, fully replace editable item fields |
-| PUT | `/items/{id}/archive` | `{ "archived": true }` (false restores) |
+| PUT | `/items/{id}/archive` | `{ "archived": true, "expected_revision": 4 }` (false restores) |
 | GET | `/items/{id}/attributes` | Custom attribute object |
 | GET | `/items/{id}/stock` | Total, per-location balances and complete newest-first history |
 | POST | `/items/{id}/stock/adjustments` | Signed `quantity`, `location_id`, `reason` |
@@ -311,6 +328,7 @@ Permanent item deletion queues associated files for safe cleanup after commit.
 ```sh
 go test ./...
 go vet ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 go build -o bin/inventrospect ./cmd/server
 node --test internal/web/explorer.test.cjs
 ```
@@ -351,9 +369,11 @@ go build -o bin/inventrospect-mcp ./cmd/mcp
 ```
 
 On upgrade, stop the old application, back up the data directory, and start the
-new binary. Migration 4 adds item revisions, durable idempotency results, deletion
-tombstones/cleanup and monotonic item/document/movement IDs. Existing inventory,
-tokens and human sessions are preserved; no new dependencies are required.
+new binary. Migration 5 adds persistent token write limits, deletion audit details
+and an index for per-principal retry quotas. Existing tokens receive 600 write
+units/minute and a 100-record bulk cap; their secrets are unchanged. Inventory,
+revisions, documents and sessions are preserved. Existing editor-owned deletion
+tokens lose deletion authority because owner authorization is checked on use.
 
 Sign in as an admin and open **Agent tokens** (`/tokens`). Choose a name, active
 acting user, scopes and optional RFC3339 expiry. Copy the secret immediately: it
@@ -380,7 +400,7 @@ and service authorization, including already-connected MCP clients.
 Scopes are independent and also bounded by the owner’s current role. A write
 scope permits its mutation response but does not grant separate read tools. No
 agent scope grants user/token management, settings changes or hierarchy deletion.
-Permanent item deletion requires its own scope, never selected by default. Agents do not use human login sessions. A read-only agent
+Permanent item deletion requires its own scope and an admin owner, never selected by default. Agents do not use human login sessions. A read-only agent
 usually needs all three `:read` scopes.
 
 **Stdio:** keep the application running, then let the MCP client launch:
@@ -439,9 +459,9 @@ optional adapter’s port.
 | `document_list` | Paginated metadata; no file bytes |
 | `document_get` | Actual binary document; `metadata_only=true` returns a resource link instead |
 | `inventory_create_item` | Create `{ "item": {...}, "initial_stock": {...} }`; stock is optional |
-| `inventory_patch_item` | Safe partial update with optional expected revision |
+| `inventory_patch_item` | Safe partial update with required expected revision |
 | `inventory_update_item` | Compatibility alias for partial updates; legacy `item` also merges |
-| `inventory_archive_item` | Set `{ "id": 123, "archived": true }`; false restores |
+| `inventory_archive_item` | Set `{ "id": 123, "archived": true, "expected_revision": 4 }`; false restores |
 | `inventory_adjust_stock` | Signed whole-number delta at explicit item/location |
 | `inventory_move_stock` | Atomic debit/credit transfer between explicit locations |
 | `document_attach` | Attach supplied `content_base64`, filename, type and optional metadata |
@@ -517,7 +537,7 @@ These capabilities work independently of MCP with the same bearer token:
 | GET | `/items/{id}/stock-summary` | Balances without loading history |
 | GET | `/items/{id}/stock-history?limit=50&before_id=456` | Cursor history |
 | POST | `/bulk/items/create` | `{ "records": [{ "item": { "name": "Bearing" } }] }` |
-| POST | `/bulk/items/update` | `{ "records": [{ "id": 123, "item": { "name": "Bearing" } }] }` |
+| POST | `/bulk/items/update` | `{ "records": [{ "id": 123, "item": { "name": "Bearing", "expected_revision": 4 } }] }` |
 | POST | `/bulk/stock/adjustments` | `{ "records": [{ "item_id": 123, "adjustment": { "location_id": 7, "quantity": 10 } }] }` |
 
 Bulk mutation requests accept 1–100 records (configurable downwards). The whole
@@ -544,18 +564,22 @@ PATCH accepts `{ "changes": {...}, "expected_revision": 4 }`. Omitted fields
 are preserved. `category_id: null` clears the category; other item fields are
 non-nullable (use empty strings/lists to clear). `tags` replaces the complete list.
 `attributes` merges keys; a null value removes that key. Unknown/invalid fields
-are rejected. Positive `expected_revision` is optional on PATCH and full PUT;
-a stale value returns HTTP 409 `revision_conflict`. Read the latest revision
-before deciding how to resolve the conflict. Transactions preserve concurrent
-patches to unrelated fields. Use revisions to protect same-field edits. Revisions
-cover item metadata/archive, not stock or document attachments.
+are rejected. **Breaking change:** positive `expected_revision` is required for
+REST PUT, PATCH, archive/restore and their MCP equivalents, including each bulk
+update record. Missing/invalid revisions return 400 `validation`; stale revisions
+return 409 `revision_conflict`, without changing data. Creation does not require a
+revision. Read the latest item, reconcile your intended changes, then resubmit
+with its revision. Browser forms submit their original revision and retain entered
+values on a conflict, with a link to reload the latest record. Revisions cover
+item metadata/archive, not stock or document attachments. No unconditional item
+replacement or patch is exposed.
 
 Additional REST routes (all under `/api/v1`):
 
 | Method | Path | Body/purpose |
 | --- | --- | --- |
-| PATCH | `/items/{id}` | `changes`, optional `expected_revision` |
-| POST | `/bulk/items/patch` | `records` with `id`, `changes`, optional `expected_revision` |
+| PATCH | `/items/{id}` | `changes`, required `expected_revision` |
+| POST | `/bulk/items/patch` | `records` with `id`, `changes`, required `expected_revision` |
 | PATCH | `/categories/{id}`, `/locations/{id}` | `changes` containing name and/or parent_id |
 | POST | `/bulk/categories/create`, `/bulk/locations/create` | `records` of name, optional parent_id/client_request_id |
 | GET | `/items/{id}/details` | Same related metadata as MCP single-item retrieval |
@@ -586,22 +610,29 @@ a restart. Different arguments return HTTP 409 `idempotency_conflict`.
 Keys expire seven days after their embedded timestamp; timestamps over five
 minutes in the future are rejected. Expired keys always return HTTP 409
 `idempotency_expired`, even after pruning: inspect inventory/history before
-issuing a replacement key. Old rows are pruned on subsequent keyed mutations.
-Storage is capped at 10,000 results and 64 MiB of response bytes, with a 1 MiB
+issuing a replacement key. Old rows are pruned on startup, hourly, and on keyed mutations. Cleanup retains
+the five-minute future-clock allowance so valid keys are never purged early.
+Storage is capped **per principal** at 10,000 results and 64 MiB of response bytes, with a 1 MiB
 per-response cap; capacity exhaustion rejects new writes without committing.
+Stable principal IDs distinguish each user/token pair; human sessions share their
+user allocation. One exhausted token cannot consume another token/user allocation.
 Replays remain available while unexpired. A keyed bulk envelope cannot also
 contain per-record keys. Unkeyed item creation batches may use per-record keys.
 Standalone document attachment remains non-idempotent; inspect metadata/checksums
 after an uncertain upload. Failed standalone mutations are not recorded.
 
 **Permanent deletion** requires `inventory:delete`, independently of write/read
-scopes and bounded by the user's role. It is irreversible, unlike archive or
+scopes and an active admin owner. Human editors/viewers are denied, as are their
+tokens even if previously issued a delete scope. It is irreversible, unlike archive or
 stock consumption. Only explicit positive, distinct IDs are accepted, up to the
 configured bulk limit. Dry-run reports item, document and stock-history counts.
 Unknown IDs abort the whole batch; tombstones return `already_deleted` on retry.
 Deletion removes item metadata/tags/attributes, ledger/balances and document
-associations in one transaction. Audit events and tombstones remain; IDs are not
-reused. Backups and unexpired cached mutation responses are not erased.
+associations in one transaction. Each deletion audit stores ID, name, manufacturer,
+MPN, actor/token, timestamp, bulk marker, batch size, shared deletion identifier,
+and removed stock/document counts in `audit_events.details`. Single-record calls
+to the bulk route are also marked as bulk. Audit events and tombstones remain;
+IDs are not reused. Backups and unexpired cached mutation responses are not erased.
 
 Physical files are queued durably and removed only after metadata commits, after
 checking that no live document references the storage key. Unlink failures leave
@@ -636,15 +667,38 @@ For a retryable adjustment, call `inventory_adjust_stock` with
 Retry with the same key and arguments. After reviewing deletion preview counts,
 use `dry_run:false` with the same explicit IDs to perform deletion.
 
-**Write safeguards:** application flags `-max-bulk-records` (default 100, range
-1–100) and `-agent-writes-per-minute` (default 60, zero disables) configure limits.
-All direct REST and both MCP transports share each token's write budget at the
-application HTTP boundary; reads, including batch-get, remain available. Failed
-requests, retries and deletion previews consume budget. Limits return HTTP 429
-`rate_limited` with `Retry-After` and structured MCP tool errors. Rate windows are
-in memory and reset on restart; this is a single-instance safeguard, not a
-cross-process quota. Human sessions are exempt. Direct in-process service calls
-have bulk caps but no HTTP rate budget. Admins can revoke tokens in **Agent tokens**.
+**Write safeguards:** admins configure limits on **Agent tokens**, both at
+creation and using **Save limits** on an existing token. No secret rotation is
+needed. Defaults for new and migrated tokens are 600 write units/minute and 100
+bulk records. Units range from 0–1,000,000; zero pauses new writes. Bulk caps range
+from 1–100. Read access and verified idempotent replays continue while paused. A verified
+keyed batch replay can also return its cached result after its bulk cap is lowered.
+Only human admins may manage token limits. REST creation accepts
+`"limits":{"write_units_per_minute":600,"bulk_record_limit":100}`; edit with
+`PUT /api/v1/tokens/{id}/limits` and the same inner object.
+
+A successful single-item create/edit/archive, stock adjustment/transfer, document
+attachment or taxonomy mutation costs one unit. Bulk operations cost one per
+successful new logical operation. A created item with initial stock/files is one
+creation operation. Deletion costs one per actually deleted item; dry-runs and
+already-deleted IDs are free. Reads, validation failures and verified identical
+replays do not consume units. Changed arguments cannot claim a replay exemption.
+
+All REST, MCP and direct service mutations share the same token budget. Unkeyed
+batches reserve their entire possible new cost before processing, then refund
+failures/replays; insufficient allowance rejects the entire batch. Keyed batches
+check the successful-record cost before committing their transaction. Rate
+exhaustion never commits a partial batch by itself. Existing per-record business
+failure semantics remain unchanged. Limit edits apply to subsequent operations;
+a batch already admitted retains its reservation.
+
+The optional application flags `-max-bulk-records` (default 100) and
+`-agent-writes-per-minute` (default 0, no additional ceiling) can impose lower
+process-wide ceilings on token settings. They are not needed for individual token
+configuration. The latter flag now counts units rather than requests. HTTP 429
+`rate_limited` includes `Retry-After`; MCP returns a structured tool error. Minute
+windows are per-token, in memory and reset on restart. Human sessions are exempt
+from write budgets. Admins can pause writes or revoke the token entirely.
 
 Errors consistently expose `error.code`, `error.message`, and optional `details`.
 Existing `validation`, `unauthorized`, `forbidden`, `not_found` codes remain;
@@ -672,6 +726,7 @@ dependency; its optional Node installation is separate from the Go build.
 go test ./...
 go test ./internal/mcpserver -count=1
 go vet ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 go build -o bin/inventrospect ./cmd/server
 go build -o bin/inventrospect-mcp ./cmd/mcp
 # Optional real subprocess check; creates a temporary API listener and data directory:

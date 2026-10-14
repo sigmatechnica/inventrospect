@@ -3,12 +3,14 @@ package inventory
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log"
 	"os"
 	"path/filepath"
 )
 
 type DeleteInput struct {
+	Bulk   bool    `json:"-"`
 	IDs    []int64 `json:"ids"`
 	DryRun bool    `json:"dry_run,omitempty"`
 }
@@ -31,7 +33,7 @@ func (s *Service) DeleteItems(ctx context.Context, a Actor, in DeleteInput) (Del
 	if e := s.authorize(ctx, a, "inventory:delete"); e != nil {
 		return DeleteResult{}, e
 	}
-	if e := s.checkBulk(len(in.IDs)); e != nil {
+	if e := s.checkBulk(ctx, a, len(in.IDs)); e != nil {
 		return DeleteResult{}, e
 	}
 	seen := map[int64]bool{}
@@ -43,6 +45,7 @@ func (s *Service) DeleteItems(ctx context.Context, a Actor, in DeleteInput) (Del
 	}
 	out, e := mutate(s, ctx, a, "delete_items", "", in, func(tx *sql.Tx) (DeleteResult, error) {
 		out := DeleteResult{DryRun: in.DryRun, Results: []DeleteEntry{}}
+		deletionID := randomToken()
 		for _, id := range in.IDs {
 			r := DeleteEntry{ID: id, Status: "deleted"}
 			var n int
@@ -80,6 +83,11 @@ func (s *Service) DeleteItems(ctx context.Context, a Actor, in DeleteInput) (Del
 			if r.Status == "already_deleted" {
 				continue
 			}
+			var name, manufacturer, mpn string
+			if e := tx.QueryRowContext(ctx, `SELECT name,manufacturer,mpn FROM items WHERE id=?`, r.ID).Scan(&name, &manufacturer, &mpn); e != nil {
+				return out, e
+			}
+			details, _ := json.Marshal(map[string]any{"item_id": r.ID, "name": name, "manufacturer": manufacturer, "mpn": mpn, "bulk": in.Bulk || len(in.IDs) > 1, "deletion_id": deletionID, "batch_size": len(in.IDs), "stock_transactions_removed": r.Movements, "documents_removed": r.Documents})
 			for _, statement := range []string{
 				`INSERT INTO document_cleanup(storage_key,queued_at) SELECT storage_key,strftime('%Y-%m-%dT%H:%M:%SZ','now') FROM documents WHERE item_id=? ON CONFLICT DO NOTHING`,
 				`DELETE FROM documents WHERE item_id=?`,
@@ -95,7 +103,7 @@ func (s *Service) DeleteItems(ctx context.Context, a Actor, in DeleteInput) (Del
 			if _, e := tx.ExecContext(ctx, `INSERT INTO deleted_items(id,deleted_at,actor_id,token_id) VALUES(?,?,?,?)`, r.ID, now(), a.UserID, tokenID(a)); e != nil {
 				return out, e
 			}
-			if e := audit(ctx, tx, a, "permanent_delete", "item", r.ID); e != nil {
+			if _, e := tx.ExecContext(ctx, `INSERT INTO audit_events(actor_id,token_id,action,resource,resource_id,created_at,details) VALUES(?,?,'permanent_delete','item',?,?,?)`, a.UserID, tokenID(a), r.ID, now(), string(details)); e != nil {
 				return out, e
 			}
 		}

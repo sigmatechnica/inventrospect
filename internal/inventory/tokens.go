@@ -10,7 +10,21 @@ import (
 
 var TokenScopes = []string{"inventory:read", "inventory:write", "categories:write", "locations:write", "inventory:delete", "stock:read", "stock:write", "documents:read", "documents:write"}
 
+type TokenLimits struct {
+	WriteUnitsPerMinute int `json:"write_units_per_minute"`
+	BulkRecordLimit     int `json:"bulk_record_limit"`
+}
+
+func defaultTokenLimits() TokenLimits { return TokenLimits{600, 100} }
+func (l TokenLimits) validate() error {
+	if l.WriteUnitsPerMinute < 0 || l.WriteUnitsPerMinute > 1000000 || l.BulkRecordLimit < 1 || l.BulkRecordLimit > 100 {
+		return invalid("Write units must be 0–1000000 (0 pauses writes); bulk limit must be 1–100")
+	}
+	return nil
+}
+
 type APIToken struct {
+	TokenLimits
 	ID         int64    `json:"id"`
 	Name       string   `json:"name"`
 	Prefix     string   `json:"prefix"`
@@ -22,10 +36,11 @@ type APIToken struct {
 	LastUsedAt *string  `json:"last_used_at"`
 }
 type TokenInput struct {
-	Name      string   `json:"name"`
-	UserID    int64    `json:"user_id"`
-	Scopes    []string `json:"scopes"`
-	ExpiresAt *string  `json:"expires_at,omitempty"`
+	Limits    *TokenLimits `json:"limits,omitempty"`
+	Name      string       `json:"name"`
+	UserID    int64        `json:"user_id"`
+	Scopes    []string     `json:"scopes"`
+	ExpiresAt *string      `json:"expires_at,omitempty"`
 }
 type TokenCreated struct {
 	Token  APIToken `json:"token"`
@@ -37,6 +52,13 @@ func (s *Service) CreateToken(ctx context.Context, a Actor, in TokenInput) (Toke
 		return TokenCreated{}, ErrForbidden
 	}
 	if e := s.authorize(ctx, a, "admin"); e != nil {
+		return TokenCreated{}, e
+	}
+	limits := defaultTokenLimits()
+	if in.Limits != nil {
+		limits = *in.Limits
+	}
+	if e := limits.validate(); e != nil {
 		return TokenCreated{}, e
 	}
 	in.Name = clean(in.Name)
@@ -86,14 +108,17 @@ func (s *Service) CreateToken(ctx context.Context, a Actor, in TokenInput) (Toke
 		return TokenCreated{}, e
 	}
 	for _, scope := range scopes {
+		if scope == "inventory:delete" && role != "admin" {
+			return TokenCreated{}, invalid("Permanent deletion requires an admin token owner")
+		}
 		if role == "viewer" && (strings.HasSuffix(scope, ":write") || scope == "inventory:delete") {
 			return TokenCreated{}, invalid("Viewer-owned tokens cannot have write scopes")
 		}
 	}
 	secret := "inv_" + randomToken()
-	t := APIToken{Name: in.Name, UserID: in.UserID, Prefix: secret[:12], Scopes: scopes, CreatedAt: now(), ExpiresAt: in.ExpiresAt}
+	t := APIToken{TokenLimits: limits, Name: in.Name, UserID: in.UserID, Prefix: secret[:12], Scopes: scopes, CreatedAt: now(), ExpiresAt: in.ExpiresAt}
 	raw, _ := json.Marshal(scopes)
-	r, e := tx.ExecContext(ctx, `INSERT INTO api_tokens(name,prefix,token_hash,user_id,scopes,created_at,expires_at) VALUES(?,?,?,?,?,?,?)`, t.Name, t.Prefix, tokenHash(secret), t.UserID, string(raw), t.CreatedAt, t.ExpiresAt)
+	r, e := tx.ExecContext(ctx, `INSERT INTO api_tokens(name,prefix,token_hash,user_id,scopes,created_at,expires_at,write_units_per_minute,bulk_record_limit) VALUES(?,?,?,?,?,?,?,?,?)`, t.Name, t.Prefix, tokenHash(secret), t.UserID, string(raw), t.CreatedAt, t.ExpiresAt, limits.WriteUnitsPerMinute, limits.BulkRecordLimit)
 	if e != nil {
 		return TokenCreated{}, e
 	}
@@ -116,7 +141,7 @@ func (s *Service) Tokens(ctx context.Context, a Actor) ([]APIToken, error) {
 	if e := s.authorize(ctx, a, "admin"); e != nil {
 		return nil, e
 	}
-	rows, e := s.db.QueryContext(ctx, `SELECT id,name,prefix,user_id,scopes,created_at,expires_at,revoked_at,last_used_at FROM api_tokens ORDER BY id DESC`)
+	rows, e := s.db.QueryContext(ctx, `SELECT id,name,prefix,user_id,scopes,created_at,expires_at,revoked_at,last_used_at,write_units_per_minute,bulk_record_limit FROM api_tokens ORDER BY id DESC`)
 	if e != nil {
 		return nil, e
 	}
@@ -125,7 +150,7 @@ func (s *Service) Tokens(ctx context.Context, a Actor) ([]APIToken, error) {
 	for rows.Next() {
 		var t APIToken
 		var raw string
-		if e = rows.Scan(&t.ID, &t.Name, &t.Prefix, &t.UserID, &raw, &t.CreatedAt, &t.ExpiresAt, &t.RevokedAt, &t.LastUsedAt); e != nil {
+		if e = rows.Scan(&t.ID, &t.Name, &t.Prefix, &t.UserID, &raw, &t.CreatedAt, &t.ExpiresAt, &t.RevokedAt, &t.LastUsedAt, &t.WriteUnitsPerMinute, &t.BulkRecordLimit); e != nil {
 			return nil, e
 		}
 		if e = json.Unmarshal([]byte(raw), &t.Scopes); e != nil {
@@ -184,4 +209,33 @@ func tokenID(a Actor) any {
 		return nil
 	}
 	return a.TokenID
+}
+
+func (s *Service) UpdateTokenLimits(ctx context.Context, a Actor, id int64, limits TokenLimits) error {
+	if a.TokenID != 0 {
+		return ErrForbidden
+	}
+	if e := s.authorize(ctx, a, "admin"); e != nil {
+		return e
+	}
+	if e := limits.validate(); e != nil {
+		return e
+	}
+	tx, e := s.db.BeginTx(ctx, nil)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	r, e := tx.ExecContext(ctx, `UPDATE api_tokens SET write_units_per_minute=?,bulk_record_limit=? WHERE id=?`, limits.WriteUnitsPerMinute, limits.BulkRecordLimit, id)
+	if e != nil {
+		return e
+	}
+	n, _ := r.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	if e = audit(ctx, tx, a, "limits", "api_token", id); e != nil {
+		return e
+	}
+	return tx.Commit()
 }

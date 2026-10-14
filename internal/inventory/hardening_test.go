@@ -25,12 +25,12 @@ func TestPartialUpdatesAndRevision(t *testing.T) {
 	if e != nil || i.Manufacturer != "TI" || i.CategoryID != nil || i.Attributes["power"] != "500 W" || i.Attributes["package"] != "TO-220" || !reflect.DeepEqual(i.Tags, before.Tags) || i.MPN != before.MPN || i.Revision != before.Revision+1 {
 		t.Fatal(i, e)
 	}
-	i, e = s.PatchItem(testCtx, a, i.ID, PatchInput{Changes: map[string]any{"attributes": map[string]any{"power": nil}}})
+	i, e = s.PatchItem(testCtx, a, i.ID, PatchInput{ExpectedRevision: &i.Revision, Changes: map[string]any{"attributes": map[string]any{"power": nil}}})
 	if e != nil || len(i.Attributes) != 1 {
 		t.Fatal(i, e)
 	}
 	for _, changes := range []map[string]any{{"name": nil}, {"archived": nil}, {"tags": nil}, {"unknown": "x"}, {"category_id": 1.5}, {"attributes": map[string]any{"x": 3}}} {
-		_, e = s.PatchItem(testCtx, a, i.ID, PatchInput{Changes: changes})
+		_, e = s.PatchItem(testCtx, a, i.ID, PatchInput{ExpectedRevision: &i.Revision, Changes: changes})
 		requireCode(t, e, "validation")
 	}
 	_, e = s.PatchItem(testCtx, a, i.ID, PatchInput{Changes: map[string]any{"notes": "stale"}, ExpectedRevision: &before.Revision})
@@ -59,21 +59,10 @@ func TestPartialUpdatesAndRevision(t *testing.T) {
 	if ok != 1 {
 		t.Fatal(ok)
 	}
-	// Independent unconditional patches merge inside serialized transactions.
-	for _, changes := range []map[string]any{{"notes": "one"}, {"manufacturer": "two"}} {
-		wg.Add(1)
-		go func(changes map[string]any) {
-			defer wg.Done()
-			if _, err := s.PatchItem(testCtx, a, i.ID, PatchInput{Changes: changes}); err != nil {
-				t.Error(err)
-			}
-		}(changes)
-	}
-	wg.Wait()
-	i, e = s.Item(testCtx, a, i.ID)
-	if e != nil || i.Notes != "one" || i.Manufacturer != "two" {
-		t.Fatal(i, e)
-	}
+	// Missing revisions fail without changing stored data.
+	_, e = s.PatchItem(testCtx, a, i.ID, PatchInput{Changes: map[string]any{"notes": "missing"}})
+	requireCode(t, e, "validation")
+
 }
 
 func TestDurableRetriesAndBulk(t *testing.T) {

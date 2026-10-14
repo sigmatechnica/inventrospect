@@ -9,7 +9,7 @@ import (
 )
 
 func addOperations(server *mcp.Server, b *Backend) {
-	add(server, "inventory_delete_item", "IRREVERSIBLY delete an explicit item, its stock history, balances, attributes, tags and document associations. Unreferenced files are cleaned after commit. This is not archive or stock consumption. Requires separate inventory:delete scope. dry_run reports counts without deleting. Retries report already_deleted; unknown IDs fail.", false, func(ctx context.Context, in struct {
+	add(server, "inventory_delete_item", "IRREVERSIBLY delete an explicit item, its stock history, balances, attributes, tags and document associations. Unreferenced files are cleaned after commit. This is not archive or stock consumption. Requires an active admin owner and separate inventory:delete scope. dry_run reports counts without deleting. Retries report already_deleted; unknown IDs fail.", false, func(ctx context.Context, in struct {
 		ID     int64 `json:"id"`
 		DryRun bool  `json:"dry_run,omitempty"`
 	}) (any, error) {
@@ -20,7 +20,7 @@ func addOperations(server *mcp.Server, b *Backend) {
 		e := b.JSON(ctx, "DELETE", fmt.Sprintf("/items/%d?dry_run=%t", in.ID, in.DryRun), nil, &out)
 		return out, e
 	})
-	add(server, "inventory_delete_items_bulk", "IRREVERSIBLY delete 1–100 explicit distinct item IDs and their dependent records in one database transaction. inventory:delete required. Unknown IDs abort the entire batch; already-deleted IDs are harmless. dry_run reports item/document/history counts. No search expressions. Archive preserves data; this operation destroys it.", false, func(ctx context.Context, in inventory.DeleteInput) (any, error) {
+	add(server, "inventory_delete_items_bulk", "IRREVERSIBLY delete 1–100 explicit distinct item IDs and their dependent records in one database transaction. An active admin owner and inventory:delete are required. Unknown IDs abort the entire batch; already-deleted IDs are harmless. dry_run reports item/document/history counts. No search expressions. Archive preserves data; this operation destroys it.", false, func(ctx context.Context, in inventory.DeleteInput) (any, error) {
 		var out inventory.DeleteResult
 		e := b.JSON(ctx, "POST", "/bulk/items/delete", in, &out)
 		return out, e

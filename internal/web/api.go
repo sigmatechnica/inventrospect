@@ -59,6 +59,7 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 			if e := decode(r, &in); e != nil {
 				return nil, 0, e
 			}
+			in.Bulk = true
 			v, e := s.service.DeleteItems(ctx, a, in)
 			return v, 200, e
 		case "categories/create", "locations/create":
@@ -123,6 +124,18 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 			}
 			v, e := s.service.CreateToken(ctx, a, in)
 			return v, 201, e
+		}
+		if len(p) == 3 && p[2] == "limits" && method == "PUT" {
+			id, e := idValue(p[1])
+			if e != nil {
+				return nil, 0, e
+			}
+			var in inventory.TokenLimits
+			if e = decode(r, &in); e != nil {
+				return nil, 0, e
+			}
+			e = s.service.UpdateTokenLimits(ctx, a, id, in)
+			return in, 200, e
 		}
 		if len(p) == 3 && p[2] == "revoke" && method == "POST" {
 			id, e := idValue(p[1])
@@ -366,7 +379,8 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 					return nil, 0, methodError()
 				}
 				var in struct {
-					Archived *bool `json:"archived"`
+					Archived         *bool `json:"archived"`
+					ExpectedRevision int64 `json:"expected_revision"`
 				}
 				if e = decode(r, &in); e != nil {
 					return nil, 0, e
@@ -374,7 +388,7 @@ func (s *Server) apiRequest(w http.ResponseWriter, r *http.Request, a inventory.
 				if in.Archived == nil {
 					return nil, 0, &inventory.Error{Code: "validation", Message: "archived is required"}
 				}
-				i, e := s.service.ArchiveItem(ctx, a, id, *in.Archived)
+				i, e := s.service.ArchiveItem(ctx, a, id, *in.Archived, in.ExpectedRevision)
 				return i, 200, e
 			case "attributes":
 				if method != "GET" {

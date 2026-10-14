@@ -134,29 +134,19 @@ func (s *Service) SaveItem(ctx context.Context, a Actor, i Item) (Item, error) {
 	if e := s.authorize(ctx, a, "inventory:write"); e != nil {
 		return i, e
 	}
-	tx, e := s.db.BeginTx(ctx, nil)
-	if e != nil {
-		return i, e
-	}
-	defer tx.Rollback()
-	i, e = saveItem(ctx, tx, a, i)
-	if e != nil {
-		return i, e
-	}
-	i, e = scanItem(tx.QueryRowContext(ctx, "SELECT "+itemColumns+" FROM items i WHERE i.id=?", i.ID))
-	if e != nil {
-		return i, e
-	}
-	if e = tx.Commit(); e != nil {
-		return i, e
-	}
-	return i, nil
+	return mutate(s, ctx, a, "save_item", "", i, func(tx *sql.Tx) (Item, error) {
+		saved, e := saveItem(ctx, tx, a, i)
+		if e != nil {
+			return saved, e
+		}
+		return scanItem(tx.QueryRowContext(ctx, "SELECT "+itemColumns+" FROM items i WHERE i.id=?", saved.ID))
+	})
 }
 
 // Shared by ordinary edits and atomic creation with initial stock/documents.
 func saveItem(ctx context.Context, tx *sql.Tx, a Actor, i Item) (Item, error) {
-	if i.Revision < 0 {
-		return i, invalid("expected_revision must be positive")
+	if i.Revision < 0 || (i.ID != 0 && i.Revision == 0) {
+		return i, invalid("expected_revision is required and must be positive for item replacement")
 	}
 	i.Name = clean(i.Name)
 	if i.Name == "" || len(i.Name) > 300 {
@@ -236,32 +226,19 @@ func saveItem(ctx context.Context, tx *sql.Tx, a Actor, i Item) (Item, error) {
 	}
 	return i, nil
 }
-func (s *Service) ArchiveItem(ctx context.Context, a Actor, id int64, archived bool) (Item, error) {
+func (s *Service) ArchiveItem(ctx context.Context, a Actor, id int64, archived bool, revisions ...int64) (Item, error) {
+	var revision *int64
+	if len(revisions) > 0 {
+		revision = &revisions[0]
+	}
 	if e := s.authorize(ctx, a, "inventory:write"); e != nil {
 		return Item{}, e
 	}
-	tx, e := s.db.BeginTx(ctx, nil)
-	if e != nil {
-		return Item{}, e
-	}
-	defer tx.Rollback()
-	r, e := tx.ExecContext(ctx, `UPDATE items SET archived=?,updated_at=?,updated_by=?,revision=revision+1 WHERE id=?`, archived, now(), a.UserID, id)
-	if e != nil {
-		return Item{}, e
-	}
-	n, _ := r.RowsAffected()
-	if n == 0 {
-		return Item{}, ErrNotFound
-	}
-	if e = audit(ctx, tx, a, "archive", "item", id); e != nil {
-		return Item{}, e
-	}
-	i, e := scanItem(tx.QueryRowContext(ctx, "SELECT "+itemColumns+" FROM items i WHERE i.id=?", id))
-	if e != nil {
-		return Item{}, e
-	}
-	if e = tx.Commit(); e != nil {
-		return Item{}, e
-	}
-	return i, nil
+	return mutate(s, ctx, a, "archive_item", "", nil, func(tx *sql.Tx) (Item, error) {
+		i, e := patchItem(ctx, tx, a, id, PatchInput{Changes: map[string]any{"archived": archived}, ExpectedRevision: revision})
+		if e != nil {
+			return i, e
+		}
+		return i, audit(ctx, tx, a, "archive", "item", id)
+	})
 }

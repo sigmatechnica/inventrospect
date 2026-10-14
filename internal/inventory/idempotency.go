@@ -71,11 +71,11 @@ func mutate[T any](s *Service, ctx context.Context, a Actor, operation, key stri
 		if e != sql.ErrNoRows {
 			return zero, e
 		}
-		if _, e = tx.ExecContext(ctx, `DELETE FROM idempotency WHERE created_at<=?`, cutoff); e != nil {
+		if _, e = tx.ExecContext(ctx, `DELETE FROM idempotency WHERE created_at<=?`, cutoff-300); e != nil {
 			return zero, e
 		}
 		var count int64
-		if e = tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(CAST(result AS BLOB))),0) FROM idempotency`).Scan(&count, &storedBytes); e != nil {
+		if e = tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(CAST(result AS BLOB))),0) FROM idempotency WHERE principal=?`, principal).Scan(&count, &storedBytes); e != nil {
 			return zero, e
 		}
 		if count >= 10000 || storedBytes >= 64*1024*1024 {
@@ -101,8 +101,32 @@ func mutate[T any](s *Service, ctx context.Context, a Actor, operation, key stri
 			return zero, e
 		}
 	}
+	units := 1
+	switch v := any(out).(type) {
+	case BulkResponse:
+		units = v.Succeeded
+	case DeleteResult:
+		units = v.Items
+		if v.DryRun {
+			units = 0
+		}
+	}
+	release, e := s.reserveWrites(ctx, tx, a, units)
+	if e != nil {
+		return zero, e
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			release(0)
+		}
+	}()
 	if e = tx.Commit(); e != nil {
 		return zero, e
+	}
+	committed = true
+	if budget, ok := ctx.Value(prepaidKey{}).(*prepaidBudget); ok {
+		budget.used += units
 	}
 	return out, nil
 }

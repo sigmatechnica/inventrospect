@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"flag"
+	"inventrospect/internal/serverlife"
 	"log"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 func main() {
 	base := flag.String("base-url", "http://127.0.0.1:8080", "Existing inventory application URL")
 	addr := flag.String("addr", "", "Optional Streamable HTTP listen address, e.g. 127.0.0.1:8081; otherwise use stdio")
+	shutdownTimeout := flag.Duration("shutdown-timeout", 15*time.Second, "Maximum wait for in-flight HTTP requests during shutdown")
 	flag.Parse()
 	backend, e := mcpserver.NewBackend(*base, os.Getenv("INVENTROSPECT_API_TOKEN"))
 	if e != nil {
@@ -35,14 +37,9 @@ func main() {
 		return
 	}
 	srv := &http.Server{Addr: *addr, Handler: mcpserver.HTTP(*base), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 90 * time.Second, WriteTimeout: 90 * time.Second, IdleTimeout: 60 * time.Second}
-	go func() {
-		<-ctx.Done()
-		stop, done := context.WithTimeout(context.Background(), 10*time.Second)
-		defer done()
-		srv.Shutdown(stop)
-	}()
+
 	log.Printf("MCP Streamable HTTP listening on %s/mcp; credentials come from each request", *addr)
-	if e = srv.ListenAndServe(); e != nil && e != http.ErrServerClosed {
+	if e = serverlife.Run(ctx, srv, *shutdownTimeout, srv.ListenAndServe); e != nil {
 		log.Fatal(e)
 	}
 }

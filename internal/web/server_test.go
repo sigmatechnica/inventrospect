@@ -63,7 +63,7 @@ func TestAPIValidationPermissionsAndCRUD(t *testing.T) {
 	if w.Header().Get("Location") != "/api/v1/items/1" {
 		t.Fatal(w.Header())
 	}
-	w = request(h, "PUT", "/api/v1/items/1", `{"name":"6204 bearing","attributes":{"ID":"20 mm"}}`, token)
+	w = request(h, "PUT", "/api/v1/items/1", `{"expected_revision":1,"name":"6204 bearing","attributes":{"ID":"20 mm"}}`, token)
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -77,7 +77,7 @@ func TestAPIValidationPermissionsAndCRUD(t *testing.T) {
 	if w.Code != 400 {
 		t.Fatal(w.Code)
 	}
-	w = request(h, "PUT", "/api/v1/items/1/archive", `{"archived":true}`, token)
+	w = request(h, "PUT", "/api/v1/items/1/archive", `{"archived":true,"expected_revision":2}`, token)
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}

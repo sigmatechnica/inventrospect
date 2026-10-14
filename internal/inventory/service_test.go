@@ -81,7 +81,7 @@ func TestItemCRUDSearchAndExport(t *testing.T) {
 			t.Fatalf("literal search %q: %v %v", q, items, e)
 		}
 	}
-	i, e = s.ArchiveItem(testCtx, a, i.ID, true)
+	i, e = s.ArchiveItem(testCtx, a, i.ID, true, i.Revision)
 	if e != nil || !i.Archived {
 		t.Fatal(i, e)
 	}
@@ -101,7 +101,7 @@ func TestItemCRUDSearchAndExport(t *testing.T) {
 	if e != nil || len(rows) != 2 || rows[1][9] != `{"power":"500 W"}` || rows[1][10] != "true" {
 		t.Fatal(rows, e)
 	}
-	if _, e = s.ArchiveItem(testCtx, a, i.ID, false); e != nil {
+	if _, e = s.ArchiveItem(testCtx, a, i.ID, false, i.Revision); e != nil {
 		t.Fatal(e)
 	}
 	_, e = s.SaveItem(testCtx, a, Item{Name: "   "})
@@ -178,7 +178,7 @@ func TestStockLedgerTransfersAndFilters(t *testing.T) {
 	if _, e = s.db.Exec(`DELETE FROM stock_movements WHERE id=1`); e == nil {
 		t.Fatal("stock deletion allowed")
 	}
-	if _, e = s.ArchiveItem(testCtx, a, i.ID, true); e != nil {
+	if _, e = s.ArchiveItem(testCtx, a, i.ID, true, i.Revision); e != nil {
 		t.Fatal(e)
 	}
 	_, e = s.AdjustStock(testCtx, a, i.ID, Adjustment{src.ID, 1, "archived"})
@@ -238,7 +238,7 @@ func TestAuthRolesAndLastAdmin(t *testing.T) {
 	loc := mustNode(t, s, a, "locations", "L", nil)
 	_, e = s.SaveItem(testCtx, v, Item{Name: "denied"})
 	requireCode(t, e, "forbidden")
-	_, e = s.ArchiveItem(testCtx, v, i.ID, true)
+	_, e = s.ArchiveItem(testCtx, v, i.ID, true, i.Revision)
 	requireCode(t, e, "forbidden")
 	_, e = s.AdjustStock(testCtx, v, i.ID, Adjustment{loc.ID, 1, "denied"})
 	requireCode(t, e, "forbidden")
@@ -333,7 +333,7 @@ func TestDocumentMetadataContentAndPersistence(t *testing.T) {
 		t.Fatal(docs, e)
 	}
 	var version int
-	if e = second.db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); e != nil || version != 4 {
+	if e = second.db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); e != nil || version != 5 {
 		t.Fatal(version, e)
 	}
 }

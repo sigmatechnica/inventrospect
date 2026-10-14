@@ -133,7 +133,7 @@ func TestBulkIndependentTransactionsAndHistory(t *testing.T) {
 	if e != nil || len(next.Entries) != 1 || next.Entries[0].Quantity != 5 || next.NextBeforeID != nil {
 		t.Fatal(next, e)
 	}
-	out, e = s.BulkUpdateItems(testCtx, a, []UpdateItemInput{{first.ID, ItemInput{Name: "Changed"}}, {999, ItemInput{Name: "Missing"}}, {0, ItemInput{Name: "No create"}}})
+	out, e = s.BulkUpdateItems(testCtx, a, []UpdateItemInput{{first.ID, ItemInput{Name: "Changed", ExpectedRevision: &first.Revision}}, {999, ItemInput{Name: "Missing"}}, {0, ItemInput{Name: "No create"}}})
 	if e != nil || out.Succeeded != 1 || out.Failed != 2 {
 		t.Fatal(out, e)
 	}

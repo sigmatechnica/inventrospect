@@ -73,7 +73,7 @@ func TestRESTPartialRetryAndLimits(t *testing.T) {
 		t.Fatal(e)
 	}
 	for j := 0; j < 3; j++ {
-		w = request(h, "PATCH", "/api/v1/items/1", `{"changes":{"notes":"x"}}`, fresh.Secret)
+		w = request(h, "PATCH", "/api/v1/items/1", fmt.Sprintf(`{"changes":{"notes":"x"},"expected_revision":%d}`, 3+j), fresh.Secret)
 		want := 200
 		if j == 2 {
 			want = 429

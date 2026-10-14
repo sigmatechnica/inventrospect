@@ -8,7 +8,7 @@ import (
 
 type PatchInput struct {
 	Changes          map[string]any `json:"changes" jsonschema:"Only supplied fields change. category_id accepts null. attributes merges keys; null attribute values remove keys. tags replaces the list."`
-	ExpectedRevision *int64         `json:"expected_revision,omitempty" jsonschema:"Optional positive metadata revision; mismatches return revision_conflict"`
+	ExpectedRevision *int64         `json:"expected_revision,omitempty" jsonschema:"Required positive metadata revision; mismatches return revision_conflict"`
 }
 type PatchItemInput struct {
 	ID int64 `json:"id"`
@@ -19,6 +19,9 @@ func patchItem(ctx context.Context, tx *sql.Tx, a Actor, id int64, in PatchInput
 	i, e := scanItem(tx.QueryRowContext(ctx, "SELECT "+itemColumns+" FROM items i WHERE i.id=?", id))
 	if e != nil {
 		return Item{}, e
+	}
+	if in.ExpectedRevision == nil {
+		return Item{}, invalid("expected_revision is required for item updates")
 	}
 	if in.ExpectedRevision != nil {
 		if *in.ExpectedRevision < 1 {

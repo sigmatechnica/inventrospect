@@ -30,12 +30,19 @@ var migration3 string
 //go:embed migration4.sql
 var migration4 string
 
+//go:embed migration5.sql
+var migration5 string
+
 type Service struct {
 	db                       *sql.DB
 	dataDir                  string
 	limitsMu                 sync.Mutex
 	maxBulk, writesPerMinute int
 	writeWindows             map[int64]writeWindow
+	maintenanceCancel        context.CancelFunc
+	maintenanceDone          chan struct{}
+	closeOnce                sync.Once
+	closeErr                 error
 }
 
 func Open(dataDir string) (*Service, error) {
@@ -52,7 +59,7 @@ func Open(dataDir string) (*Service, error) {
 	}
 	// One connection serializes writes and guarantees connection-local SQLite settings.
 	db.SetMaxOpenConns(1)
-	s := &Service{db: db, dataDir: abs, maxBulk: 100, writesPerMinute: 60, writeWindows: map[int64]writeWindow{}}
+	s := &Service{db: db, dataDir: abs, maxBulk: 100, writesPerMinute: 0, writeWindows: map[int64]writeWindow{}}
 	if _, err = db.Exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY);`); err != nil {
 		db.Close()
 		return nil, err
@@ -62,7 +69,7 @@ func Open(dataDir string) (*Service, error) {
 		db.Close()
 		return nil, err
 	}
-	migrations := []string{schema, migration2, migration3, migration4}
+	migrations := []string{schema, migration2, migration3, migration4, migration5}
 	if version > len(migrations) {
 		db.Close()
 		return nil, errors.New("database schema is newer than this executable")
@@ -93,10 +100,20 @@ func Open(dataDir string) (*Service, error) {
 	if e := s.cleanupFiles(context.Background()); e != nil {
 		log.Printf("Document cleanup pending: %v", e)
 	}
+	s.startMaintenance()
 	return s, nil
 }
-func (s *Service) Close() error { return s.db.Close() }
-func now() string               { return time.Now().UTC().Format(time.RFC3339Nano) }
+func (s *Service) Close() error {
+	s.closeOnce.Do(func() {
+		if s.maintenanceCancel != nil {
+			s.maintenanceCancel()
+			<-s.maintenanceDone
+		}
+		s.closeErr = s.db.Close()
+	})
+	return s.closeErr
+}
+func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 func randomToken() string {
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -114,7 +131,7 @@ func (s *Service) authorize(ctx context.Context, a Actor, scope string) error {
 	if err != nil {
 		return err
 	}
-	if scope == "admin" && role != "admin" {
+	if (scope == "admin" || scope == "inventory:delete") && role != "admin" {
 		return ErrForbidden
 	}
 	if (scope == "write" || strings.HasSuffix(scope, ":write") || scope == "inventory:delete") && role == "viewer" {

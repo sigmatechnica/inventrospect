@@ -87,7 +87,7 @@ func runBulk(n int, fn func(int) (any, error)) (BulkResponse, error) {
 	return out, nil
 }
 func (s *Service) BulkCreateItems(ctx context.Context, a Actor, records []CreateItemInput, keys ...string) (BulkResponse, error) {
-	if e := s.checkBulk(len(records)); e != nil {
+	if e := s.checkReplayBulk(ctx, a, len(records), "bulk_create_items", requestKey(keys), records); e != nil {
 		return BulkResponse{}, e
 	}
 	if e := s.authorize(ctx, a, "inventory:write"); e != nil {
@@ -110,18 +110,22 @@ func (s *Service) BulkCreateItems(ctx context.Context, a Actor, records []Create
 			})
 		})
 	}
-	return runBulk(len(records), func(i int) (any, error) {
+	replays := make([]bool, len(records))
+	for j, r := range records {
+		replays[j] = s.isReplay(ctx, a, "create_item", r.ClientRequestID, []any{r.Item.Item(0), r.InitialStock, []Document(nil)})
+	}
+	return s.limitedBulk(ctx, a, len(records), replays, func(ctx context.Context, i int) (any, error) {
 		return s.CreateItem(ctx, a, records[i].Item.Item(0), records[i].InitialStock, nil, records[i].ClientRequestID)
 	})
 }
 func (s *Service) BulkUpdateItems(ctx context.Context, a Actor, records []UpdateItemInput) (BulkResponse, error) {
-	if e := s.checkBulk(len(records)); e != nil {
+	if e := s.checkBulk(ctx, a, len(records)); e != nil {
 		return BulkResponse{}, e
 	}
 	if e := s.authorize(ctx, a, "inventory:write"); e != nil {
 		return BulkResponse{}, e
 	}
-	return runBulk(len(records), func(i int) (any, error) {
+	return s.limitedBulk(ctx, a, len(records), nil, func(ctx context.Context, i int) (any, error) {
 		if records[i].ID <= 0 {
 			return nil, invalid("Item ID must be positive")
 		}
@@ -129,7 +133,7 @@ func (s *Service) BulkUpdateItems(ctx context.Context, a Actor, records []Update
 	})
 }
 func (s *Service) BulkAdjustStock(ctx context.Context, a Actor, records []AdjustStockInput, keys ...string) (BulkResponse, error) {
-	if e := s.checkBulk(len(records)); e != nil {
+	if e := s.checkReplayBulk(ctx, a, len(records), "bulk_adjust_stock", requestKey(keys), records); e != nil {
 		return BulkResponse{}, e
 	}
 	if e := s.authorize(ctx, a, "stock:write"); e != nil {
@@ -140,7 +144,9 @@ func (s *Service) BulkAdjustStock(ctx context.Context, a Actor, records []Adjust
 			return bulkTx(ctx, tx, len(records), func(j int) (any, error) { return adjustStockTx(ctx, tx, a, records[j].ItemID, records[j].Adjustment) })
 		})
 	}
-	return runBulk(len(records), func(i int) (any, error) { return s.AdjustStock(ctx, a, records[i].ItemID, records[i].Adjustment) })
+	return s.limitedBulk(ctx, a, len(records), nil, func(ctx context.Context, i int) (any, error) {
+		return s.AdjustStock(ctx, a, records[i].ItemID, records[i].Adjustment)
+	})
 }
 
 // Keyed batches commit successes and their full indexed response together.
@@ -172,13 +178,15 @@ func bulkTx(ctx context.Context, tx *sql.Tx, n int, fn func(int) (any, error)) (
 }
 
 func (s *Service) BulkPatchItems(ctx context.Context, a Actor, records []PatchItemInput) (BulkResponse, error) {
-	if e := s.checkBulk(len(records)); e != nil {
+	if e := s.checkBulk(ctx, a, len(records)); e != nil {
 		return BulkResponse{}, e
 	}
 	if e := s.authorize(ctx, a, "inventory:write"); e != nil {
 		return BulkResponse{}, e
 	}
-	return runBulk(len(records), func(j int) (any, error) { return s.PatchItem(ctx, a, records[j].ID, records[j].PatchInput) })
+	return s.limitedBulk(ctx, a, len(records), nil, func(ctx context.Context, j int) (any, error) {
+		return s.PatchItem(ctx, a, records[j].ID, records[j].PatchInput)
+	})
 }
 
 type HistoryPage struct {

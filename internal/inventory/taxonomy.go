@@ -50,7 +50,7 @@ func (s *Service) PatchNode(ctx context.Context, a Actor, kind string, id int64,
 	})
 }
 func (s *Service) BulkCreateNodes(ctx context.Context, a Actor, kind string, records []NodeInput) (BulkResponse, error) {
-	if e := s.checkBulk(len(records)); e != nil {
+	if e := s.checkBulk(ctx, a, len(records)); e != nil {
 		return BulkResponse{}, e
 	}
 	if !nodeKind(kind) {
@@ -59,7 +59,11 @@ func (s *Service) BulkCreateNodes(ctx context.Context, a Actor, kind string, rec
 	if e := s.authorize(ctx, a, kind+":write"); e != nil {
 		return BulkResponse{}, e
 	}
-	return runBulk(len(records), func(j int) (any, error) {
+	replays := make([]bool, len(records))
+	for j, r := range records {
+		replays[j] = s.isReplay(ctx, a, "save_"+kind, r.ClientRequestID, Node{Name: r.Name, ParentID: r.ParentID})
+	}
+	return s.limitedBulk(ctx, a, len(records), replays, func(ctx context.Context, j int) (any, error) {
 		r := records[j]
 		return s.SaveNode(ctx, a, kind, Node{Name: r.Name, ParentID: r.ParentID}, r.ClientRequestID)
 	})

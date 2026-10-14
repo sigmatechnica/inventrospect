@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"inventrospect/internal/inventory"
 	"net/http"
@@ -53,7 +54,19 @@ func (s *Server) uiRequest(w http.ResponseWriter, r *http.Request, a inventory.A
 				if id == 0 {
 					i, e = s.createItemForm(r, a, i)
 				} else {
+					submitted := i
 					i, e = s.service.SaveItem(ctx, a, i)
+					var problem *inventory.Error
+					if errors.As(e, &problem) && problem.Code == "revision_conflict" {
+						data["Item"], data["View"], data["Title"], data["Action"] = submitted, "edit", "Edit conflict", itemURL(id)
+						data["Conflict"] = true
+						data["Categories"], e = s.service.Nodes(ctx, a, "categories")
+						if e != nil {
+							return e
+						}
+						s.render(w, r, 409, data)
+						return nil
+					}
 				}
 				if e != nil {
 					return e
@@ -94,7 +107,11 @@ func (s *Server) uiRequest(w http.ResponseWriter, r *http.Request, a inventory.A
 				case "documents":
 					_, e = s.upload(r, a, id)
 				case "archive":
-					_, e = s.service.ArchiveItem(ctx, a, id, r.FormValue("archived") == "true")
+					revision, err := idValue(r.FormValue("expected_revision"))
+					if err != nil {
+						return err
+					}
+					_, e = s.service.ArchiveItem(ctx, a, id, r.FormValue("archived") == "true", revision)
 				default:
 					return inventory.ErrNotFound
 				}
@@ -105,6 +122,21 @@ func (s *Server) uiRequest(w http.ResponseWriter, r *http.Request, a inventory.A
 				return nil
 			}
 		case "tokens":
+			if len(parts) == 3 && parts[2] == "limits" {
+				id, err := idValue(parts[1])
+				if err != nil {
+					return err
+				}
+				limits, err := tokenLimitsForm(r)
+				if err != nil {
+					return err
+				}
+				if err = s.service.UpdateTokenLimits(ctx, a, id, *limits); err != nil {
+					return err
+				}
+				http.Redirect(w, r, "/tokens", 303)
+				return nil
+			}
 			if len(parts) == 3 && parts[2] == "revoke" {
 				id, err := idValue(parts[1])
 				if err != nil {
@@ -123,7 +155,11 @@ func (s *Server) uiRequest(w http.ResponseWriter, r *http.Request, a inventory.A
 			if err != nil {
 				return err
 			}
-			in := inventory.TokenInput{Name: r.FormValue("name"), UserID: owner, Scopes: r.Form["scopes"]}
+			limits, err := tokenLimitsForm(r)
+			if err != nil {
+				return err
+			}
+			in := inventory.TokenInput{Limits: limits, Name: r.FormValue("name"), UserID: owner, Scopes: r.Form["scopes"]}
 			if expiry := strings.TrimSpace(r.FormValue("expires_at")); expiry != "" {
 				in.ExpiresAt = &expiry
 			}
@@ -360,6 +396,12 @@ func quantityForm(r *http.Request) (float64, error) {
 func itemForm(r *http.Request, id int64) (inventory.Item, error) {
 	i := inventory.Item{ID: id, Name: r.FormValue("name"), Description: r.FormValue("description"), Manufacturer: r.FormValue("manufacturer"), MPN: r.FormValue("mpn"), Condition: r.FormValue("condition"), Notes: r.FormValue("notes"), Tags: strings.Split(r.FormValue("tags"), ","), Archived: r.FormValue("archived") == "on"}
 	var e error
+	if id != 0 {
+		i.Revision, e = idValue(r.FormValue("expected_revision"))
+		if e != nil {
+			return i, &inventory.Error{Code: "validation", Message: "expected_revision is required for editing"}
+		}
+	}
 	i.CategoryID, e = optionalID(r.FormValue("category_id"))
 	if e != nil {
 		return i, e
@@ -370,4 +412,18 @@ func itemForm(r *http.Request, id int64) (inventory.Item, error) {
 		}
 	}
 	return i, nil
+}
+
+func tokenLimitsForm(r *http.Request) (*inventory.TokenLimits, error) {
+	limits := inventory.TokenLimits{WriteUnitsPerMinute: 600, BulkRecordLimit: 100}
+	for key, dest := range map[string]*int{"write_units_per_minute": &limits.WriteUnitsPerMinute, "bulk_record_limit": &limits.BulkRecordLimit} {
+		if raw := r.FormValue(key); raw != "" {
+			n, e := strconv.Atoi(raw)
+			if e != nil {
+				return nil, &inventory.Error{Code: "validation", Message: "Token limits must be whole numbers"}
+			}
+			*dest = n
+		}
+	}
+	return &limits, nil
 }

@@ -31,8 +31,7 @@ type Server struct {
 	templates *template.Template
 	secure    bool
 	loginMu   sync.Mutex
-	attempts  int
-	window    time.Time
+	logins    map[string]loginWindow
 }
 
 func New(s *inventory.Service, secure bool) http.Handler {
@@ -139,12 +138,7 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, inventory.Ac
 		if r.MultipartForm != nil {
 			defer r.MultipartForm.RemoveAll()
 		}
-		if r.Method != "GET" && r.Method != "HEAD" && r.URL.Path != "/api/v1/items/batch-get" {
-			if e = s.service.AllowAgentWrite(a); e != nil {
-				s.fail(w, r, e)
-				return
-			}
-		}
+
 		next(w, r, a)
 	}
 }
@@ -178,6 +172,9 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, e error) {
 		case "rate_limited":
 			status = 429
 			w.Header().Set("Retry-After", "60")
+			if seconds, ok := known.Details["retry_after_seconds"].(int); ok {
+				w.Header().Set("Retry-After", strconv.Itoa(seconds))
+			}
 		case "revision_conflict", "idempotency_conflict", "idempotency_expired":
 			status = 409
 		case "method_not_allowed":
@@ -244,21 +241,11 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, status int, data
 	w.WriteHeader(status)
 	w.Write(b.Bytes())
 }
-func (s *Server) allowLogin() bool {
-	s.loginMu.Lock()
-	defer s.loginMu.Unlock()
-	if time.Since(s.window) > time.Minute {
-		s.window = time.Now()
-		s.attempts = 0
-	}
-	s.attempts++
-	return s.attempts <= 30
-}
 func (s *Server) login(w http.ResponseWriter, r *http.Request, username, password string) (string, error) {
 	if !sameOrigin(r) {
 		return "", inventory.ErrForbidden
 	}
-	if !s.allowLogin() {
+	if !s.allowLogin(r, username) {
 		w.Header().Set("Retry-After", "60")
 		return "", &inventory.Error{Code: "rate_limited", Message: "Too many login attempts; try again in a minute"}
 	}

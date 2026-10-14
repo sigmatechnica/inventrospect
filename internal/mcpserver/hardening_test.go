@@ -18,7 +18,7 @@ func TestMCPHardenedOperations(t *testing.T) {
 	if !strings.Contains(resultJSON(t, r), `"Vds":"60 V"`) || !strings.Contains(resultJSON(t, r), `"revision":2`) {
 		t.Fatal(resultJSON(t, r))
 	}
-	r = call(t, cs, "inventory_update_item", map[string]any{"id": 1, "item": map[string]any{"manufacturer": "TI"}})
+	r = call(t, cs, "inventory_update_item", map[string]any{"id": 1, "expected_revision": 2, "item": map[string]any{"manufacturer": "TI"}})
 	if !strings.Contains(resultJSON(t, r), `"notes":"checked"`) {
 		t.Fatal("legacy alias cleared fields", resultJSON(t, r))
 	}

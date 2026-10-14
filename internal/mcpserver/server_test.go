@@ -185,7 +185,7 @@ func TestMCPStockAndBulk(t *testing.T) {
 	if !strings.Contains(resultJSON(t, r), `"succeeded":1`) || !strings.Contains(resultJSON(t, r), `"failed":1`) {
 		t.Fatal(resultJSON(t, r))
 	}
-	r = call(t, cs, "inventory_update_items_bulk", map[string]any{"records": []any{map[string]any{"id": 2, "item": map[string]any{"name": "Updated bearing"}}, map[string]any{"id": 999, "item": map[string]any{"name": "Missing"}}}})
+	r = call(t, cs, "inventory_update_items_bulk", map[string]any{"records": []any{map[string]any{"id": 2, "expected_revision": 1, "item": map[string]any{"name": "Updated bearing"}}, map[string]any{"id": 999, "expected_revision": 1, "item": map[string]any{"name": "Missing"}}}})
 	if !strings.Contains(resultJSON(t, r), `"failed":1`) {
 		t.Fatal(resultJSON(t, r))
 	}
@@ -197,7 +197,7 @@ func TestMCPStockAndBulk(t *testing.T) {
 	if e == nil && !bad.IsError {
 		t.Fatal("fractional mutation accepted")
 	}
-	call(t, cs, "inventory_archive_item", map[string]any{"id": 1, "archived": true})
+	call(t, cs, "inventory_archive_item", map[string]any{"id": 1, "expected_revision": 1, "archived": true})
 	bad, e = cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "inventory_adjust_stock", Arguments: map[string]any{"id": 1, "location_id": 1, "quantity": 1}})
 	if e == nil && !bad.IsError {
 		t.Fatal("archived mutation accepted")
@@ -242,6 +242,7 @@ func TestMCPDocumentBytesAndPermissions(t *testing.T) {
 		args := map[string]any{"id": 1}
 		if name == "inventory_archive_item" {
 			args["archived"] = true
+			args["expected_revision"] = 1
 		}
 		bad, e = reader.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
 		if e != nil || !bad.IsError || !strings.Contains(resultJSON(t, bad), "forbidden") {

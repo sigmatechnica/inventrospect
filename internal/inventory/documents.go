@@ -74,21 +74,14 @@ func (s *Service) AttachDocument(ctx context.Context, a Actor, id int64, d Docum
 		return d, e
 	}
 	committed := false
+	prepared := d
 	defer func() {
 		if !committed {
-			s.removeDocumentFile(d)
+			s.removeDocumentFile(prepared)
 		}
 	}()
-	tx, e := s.db.BeginTx(ctx, nil)
+	d, e = mutate(s, ctx, a, "attach_document", "", nil, func(tx *sql.Tx) (Document, error) { return insertDocument(ctx, tx, a, id, d) })
 	if e != nil {
-		return d, e
-	}
-	defer tx.Rollback()
-	d, e = insertDocument(ctx, tx, a, id, d)
-	if e != nil {
-		return d, e
-	}
-	if e = tx.Commit(); e != nil {
 		return d, e
 	}
 	committed = true
