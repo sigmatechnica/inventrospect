@@ -91,3 +91,23 @@ docker compose up -d
 ```
 
 This uses the current version's normal migration/cleanup startup, so use the image matching your database. Reconciliation only considers regular, unreferenced files with known storage names older than 24 hours. It ignores recent files, unknown names, directories and symlinks. Dry-run is the default; referenced files are never candidates. Do not edit document storage externally while maintenance runs.
+
+## Healthy containers but no published ports
+
+Use a normal bridge network for the app and MCP services. Docker may accept port
+bindings on an `internal: true` network without creating host mappings. Loopback
+bindings in `ports` restrict external exposure; the bridge itself permits outbound
+connections. An internal-only network is not appropriate for these published services.
+
+After upgrading from the affected Compose configuration, recreate the network:
+
+```bash
+docker compose down
+docker compose up -d --wait
+```
+
+Do not add `--volumes` or `-v`: the existing data volume must be retained.
+Check `docker compose ps`, `docker compose port app 8080`, and
+`curl --fail http://127.0.0.1:8080/readyz`. Container health alone does not prove
+that a host port is reachable; socket-listing tools alone are also insufficient
+when port forwarding is implemented through firewall rules.

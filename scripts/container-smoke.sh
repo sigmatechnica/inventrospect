@@ -10,6 +10,9 @@ password=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
 printf '%s\n' "$password" | "${compose[@]}" run -T --rm --no-deps app -data=/data -init-admin -admin-password-stdin
 "${compose[@]}" up -d --wait --wait-timeout 120
 [[ $(docker inspect --format '{{.Config.User}}' "$("${compose[@]}" ps -q app)") == 65532:65532 ]]
+# Internal health can succeed even when Docker never publishes a host port.
+curl --fail --silent --show-error --max-time 5 http://127.0.0.1:18080/readyz >/dev/null
+curl --fail --silent --show-error --max-time 5 http://127.0.0.1:18081/readyz >/dev/null
 "${compose[@]}" exec -T app inventrospect-ops health
 "${compose[@]}" exec -T mcp inventrospect-ops health -url=http://127.0.0.1:8081/readyz
 # Authentication rejects invalid MCP bearer tokens.

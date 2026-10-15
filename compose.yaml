@@ -68,7 +68,9 @@ services:
       - backups:/backups
 networks:
   inventory:
-    internal: true
+    # Docker does not publish host ports on an internal-only network.
+    # Loopback port bindings above provide the default exposure boundary.
+    driver: bridge
 volumes:
   data:
   backups:
