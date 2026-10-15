@@ -8,7 +8,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"inventrospect/internal/datalock"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +45,7 @@ type Service struct {
 	maintenanceDone          chan struct{}
 	closeOnce                sync.Once
 	closeErr                 error
+	directoryLock            *os.File
 }
 
 func Open(dataDir string) (*Service, error) {
@@ -50,17 +53,48 @@ func Open(dataDir string) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = os.MkdirAll(filepath.Join(abs, "documents"), 0700); err != nil {
-		return nil, err
-	}
-	db, err := sql.Open("sqlite", filepath.Join(abs, "inventory.db"))
+	lock, err := datalock.Acquire(abs)
 	if err != nil {
 		return nil, err
 	}
-	// One connection serializes writes and guarantees connection-local SQLite settings.
+	owned := false
+	defer func() {
+		if !owned {
+			lock.Close()
+		}
+	}()
+	if _, err = os.Stat(filepath.Join(abs, ".restore-incomplete")); err == nil {
+		return nil, errors.New("incomplete restore: restore into a fresh data directory before startup")
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	entries, err := os.ReadDir(abs)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".restore-") {
+			return nil, errors.New("incomplete restore: use a fresh data directory")
+		}
+	}
+	if err = os.MkdirAll(filepath.Join(abs, "documents"), 0700); err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(filepath.Join(abs, "documents"))
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("documents must be a real directory")
+	}
+	db, err := sql.Open("sqlite", SQLiteDSN(filepath.Join(abs, "inventory.db")))
+	if err != nil {
+		return nil, err
+	}
+	// One connection serializes writes. The DSN configures every replacement connection.
 	db.SetMaxOpenConns(1)
-	s := &Service{db: db, dataDir: abs, maxBulk: 100, writesPerMinute: 0, writeWindows: map[int64]writeWindow{}}
-	if _, err = db.Exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY);`); err != nil {
+	s := &Service{db: db, dataDir: abs, directoryLock: lock, maxBulk: 100, writesPerMinute: 0, writeWindows: map[int64]writeWindow{}}
+	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY);`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -92,6 +126,7 @@ func Open(dataDir string) (*Service, error) {
 			db.Close()
 			return nil, e
 		}
+		log.Printf("database migration applied version=%d", next)
 	}
 	if err = os.Chmod(filepath.Join(abs, "inventory.db"), 0600); err != nil {
 		db.Close()
@@ -100,7 +135,9 @@ func Open(dataDir string) (*Service, error) {
 	if e := s.cleanupFiles(context.Background()); e != nil {
 		log.Printf("Document cleanup pending: %v", e)
 	}
+	log.Printf("database ready schema=%d", len(migrations))
 	s.startMaintenance()
+	owned = true
 	return s, nil
 }
 func (s *Service) Close() error {
@@ -110,6 +147,9 @@ func (s *Service) Close() error {
 			<-s.maintenanceDone
 		}
 		s.closeErr = s.db.Close()
+		if s.directoryLock != nil {
+			s.closeErr = errors.Join(s.closeErr, s.directoryLock.Close())
+		}
 	})
 	return s.closeErr
 }
@@ -207,3 +247,15 @@ func (s *Service) itemExists(ctx context.Context, id int64) error {
 func (s *Service) itemRecord(ctx context.Context, id int64) (Item, error) {
 	return scanItem(s.db.QueryRowContext(ctx, "SELECT "+itemColumns+" FROM items i WHERE i.id=?", id))
 }
+
+// SQLiteDSN installs settings whenever database/sql opens a connection.
+func SQLiteDSN(path string) string {
+	u := url.URL{Scheme: "file", Path: path}
+	q := url.Values{}
+	q.Add("_pragma", "foreign_keys(1)")
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "journal_mode(WAL)")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+func (s *Service) Ready(ctx context.Context) error { return s.db.PingContext(ctx) }

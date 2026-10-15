@@ -319,6 +319,9 @@ func TestDocumentMetadataContentAndPersistence(t *testing.T) {
 	if e != nil || len(files) != 1 {
 		t.Fatal(files, e)
 	}
+	if e = s.Close(); e != nil {
+		t.Fatal(e)
+	}
 	second, e := Open(s.dataDir)
 	if e != nil {
 		t.Fatal(e)

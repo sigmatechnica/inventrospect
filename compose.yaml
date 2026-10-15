@@ -1,0 +1,74 @@
+name: inventrospect
+x-runtime: &runtime
+  image: ${INVENTROSPECT_IMAGE:-inventrospect:local}
+  build:
+    context: .
+  user: "65532:65532"
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=256m,mode=1777
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 30s
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+services:
+  app:
+    <<: *runtime
+    command:
+      - -data=/data
+      - -addr=0.0.0.0:8080
+      # Internal container HTTP; only loopback is published by default.
+      - -allow-insecure-http=true
+      - -secure-cookies=${SECURE_COOKIES:-false}
+      - -shutdown-timeout=${SHUTDOWN_TIMEOUT:-15s}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-8080}:8080"
+    volumes:
+      - data:/data
+    networks: [inventory]
+  mcp:
+    <<: *runtime
+    entrypoint: [/usr/local/bin/inventrospect-mcp]
+    command:
+      - -base-url=http://app:8080
+      - -addr=0.0.0.0:8081
+      - -allow-insecure-http=true
+      - -shutdown-timeout=${SHUTDOWN_TIMEOUT:-15s}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${MCP_PORT:-8081}:8081"
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, /usr/local/bin/inventrospect-ops, health, -url=http://127.0.0.1:8081/readyz]
+      interval: 30s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
+    networks: [inventory]
+    # No data volume: MCP only uses REST.
+  backup:
+    <<: *runtime
+    profiles: [maintenance]
+    healthcheck:
+      disable: true
+    restart: "no"
+    environment:
+      TMPDIR: /backups
+    network_mode: none
+    entrypoint: [/usr/local/bin/inventrospect-ops]
+    command: [backup, -data=/data, -archive=/backups/inventrospect.tar.gz]
+    volumes:
+      - data:/data
+      - backups:/backups
+networks:
+  inventory:
+    internal: true
+volumes:
+  data:
+  backups:

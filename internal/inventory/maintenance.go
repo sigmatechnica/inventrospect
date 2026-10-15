@@ -28,6 +28,9 @@ func (s *Service) startMaintenance() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				if err := s.cleanupFiles(ctx); err != nil && ctx.Err() == nil {
+					log.Printf("Document cleanup pending: %v", err)
+				}
 				if err := s.pruneIdempotency(ctx); err != nil && ctx.Err() == nil {
 					log.Printf("Idempotency cleanup: %v", err)
 				}

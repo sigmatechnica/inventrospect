@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -127,45 +128,54 @@ func (s *Service) DeleteItems(ctx context.Context, a Actor, in DeleteInput) (Del
 // Metadata is removed before bytes. Failures leave a durable queue, retried at
 // startup and on subsequent deletion calls. Never unlink a referenced key.
 func (s *Service) cleanupFiles(ctx context.Context) error {
-	tx, e := s.db.BeginTx(ctx, nil)
-	if e != nil {
-		return e
-	}
-	defer tx.Rollback()
-	rows, e := tx.QueryContext(ctx, `SELECT storage_key FROM document_cleanup LIMIT 1000`)
+	rows, e := s.db.QueryContext(ctx, `SELECT storage_key FROM document_cleanup ORDER BY queued_at,storage_key LIMIT 1000`)
 	if e != nil {
 		return e
 	}
 	keys := []string{}
 	for rows.Next() {
-		var k string
-		if e = rows.Scan(&k); e != nil {
+		var key string
+		if e = rows.Scan(&key); e != nil {
 			rows.Close()
 			return e
 		}
-		keys = append(keys, k)
+		keys = append(keys, key)
 	}
 	e = rows.Err()
 	rows.Close()
 	if e != nil {
 		return e
 	}
-	for _, k := range keys {
-		var refs int
-		if e = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents WHERE storage_key=?`, k).Scan(&refs); e != nil {
+	var failures []error
+	for _, key := range keys {
+		if e = s.cleanupFile(ctx, key); e != nil {
+			// Rotate failed entries behind older work, and retry at most once per pass.
+			_, updateErr := s.db.ExecContext(ctx, `UPDATE document_cleanup SET queued_at=? WHERE storage_key=?`, now(), key)
+			failures = append(failures, errors.Join(e, updateErr))
+		}
+	}
+	return errors.Join(failures...)
+}
+func (s *Service) cleanupFile(ctx context.Context, key string) error {
+	if key == "" || key == "." || key == ".." || filepath.Base(key) != key {
+		return invalid("Invalid queued storage key")
+	}
+	tx, e := s.db.BeginTx(ctx, nil)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	var refs int
+	if e = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents WHERE storage_key=?`, key).Scan(&refs); e != nil {
+		return e
+	}
+	if refs == 0 {
+		if e = os.Remove(filepath.Join(s.dataDir, "documents", key)); e != nil && !os.IsNotExist(e) {
 			return e
 		}
-		if refs == 0 {
-			if k == "" || k == "." || k == ".." || filepath.Base(k) != k {
-				return invalid("Invalid queued storage key")
-			}
-			if e = os.Remove(filepath.Join(s.dataDir, "documents", k)); e != nil && !os.IsNotExist(e) {
-				return e
-			}
-		}
-		if _, e = tx.ExecContext(ctx, `DELETE FROM document_cleanup WHERE storage_key=?`, k); e != nil {
-			return e
-		}
+	}
+	if _, e = tx.ExecContext(ctx, `DELETE FROM document_cleanup WHERE storage_key=?`, key); e != nil {
+		return e
 	}
 	return tx.Commit()
 }

@@ -76,11 +76,15 @@ func TestDurableRetriesAndBulk(t *testing.T) {
 		t.Fatal(e)
 	}
 	// Simulate losing the response: reopen and resend the identical request.
+	if e = s.Close(); e != nil {
+		t.Fatal(e)
+	}
 	other, e := Open(s.dataDir)
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer other.Close()
+	s = other
 	retry, e := other.CreateItem(testCtx, a, input, Adjustment{LocationID: loc.ID, Quantity: 10}, nil, key)
 	if e != nil || !reflect.DeepEqual(first, retry) {
 		t.Fatal(first, retry, e)

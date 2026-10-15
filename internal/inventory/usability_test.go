@@ -200,6 +200,9 @@ func TestPreferencesAndPermissions(t *testing.T) {
 	if e != nil || viewer.Theme != "dark" {
 		t.Fatal(viewer, e)
 	}
+	if e = s.Close(); e != nil {
+		t.Fatal(e)
+	}
 	second, e := Open(s.dataDir)
 	if e != nil {
 		t.Fatal(e)
