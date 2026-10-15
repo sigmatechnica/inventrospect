@@ -30,3 +30,19 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Local inventory and compiled server
+/data/
+/bin/
+/server
+
+# Local secrets, snapshots and release artifacts
+.env.*
+!.env.example
+/backups/
+/dist/
+*.db
+*.db-wal
+*.db-shm
+*.tar.gz
+*.swp
