@@ -1,0 +1,13 @@
+# Optional source-build override. See docs/development.md.
+x-source: &source
+  image: ${INVENTROSPECT_IMAGE:-inventrospect:local}
+  pull_policy: never
+  build:
+    context: .
+services:
+  app:
+    <<: *source
+  mcp:
+    <<: *source
+  backup:
+    <<: *source

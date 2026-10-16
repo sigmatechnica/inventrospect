@@ -8,6 +8,9 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-24.04
+    env:
+      COMPOSE_FILE: compose.yaml:compose.build.yaml
+      INVENTROSPECT_IMAGE: inventrospect:local
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6

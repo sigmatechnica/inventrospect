@@ -1,8 +1,6 @@
 name: inventrospect
 x-runtime: &runtime
-  image: ${INVENTROSPECT_IMAGE:-inventrospect:local}
-  build:
-    context: .
+  image: ${INVENTROSPECT_IMAGE:-ghcr.io/sigmatechnica/inventrospect:latest}
   user: "65532:65532"
   read_only: true
   tmpfs:

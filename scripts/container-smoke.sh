@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Uses an isolated Compose project; never touches the default installation.
 set -euo pipefail
+export COMPOSE_FILE=${COMPOSE_FILE:-compose.yaml:compose.build.yaml}
+export INVENTROSPECT_IMAGE=${INVENTROSPECT_IMAGE:-inventrospect:local}
 project="inventrospect-ci-${RANDOM}-${RANDOM}"
 export HTTP_PORT=18080 MCP_PORT=18081
 compose=(docker compose -p "$project")

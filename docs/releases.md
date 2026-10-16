@@ -9,3 +9,12 @@ The container uses GHCR with the repository owner/name converted to lowercase au
 Only the tag publish job receives contents/package write permissions using GitHub's built-in token. Ordinary PR jobs cannot publish. Enable Actions and package publishing in repository settings; ensure GHCR package visibility is public for an anonymous public quick start. No release has been implied by adding these workflows. Check the first hosted run, both architecture pulls, release assets and anonymous access before announcing availability.
 
 Local archive check: `bash scripts/release-build.sh v0.1.0 "$(git rev-parse HEAD)"`. This creates files only; it does not tag, upload or publish. Publishing jobs are not fully atomic across GHCR and GitHub: inspect any failed release before retrying. Never replace an already-announced version with different contents.
+
+## Public image access
+
+GHCR package visibility is separate from repository visibility. Making the source
+repository public does not make an existing container package public. In GitHub,
+open the `inventrospect` package, choose **Package settings**, then change its
+visibility to **Public**. This applies to existing image versions; another release
+push is not required just to change visibility. The anonymous quick start requires
+public package access.

@@ -2,7 +2,23 @@
 
 Inventrospect is a self-hosted engineering inventory application with a conventional web interface, REST API and MCP interface for AI agents.
 
-Maintain inventory manually, or allow external AI agents to inspect and manage inventory, retrieve technical documents and reason about available components. Inventrospect itself does not require an LLM or provide built-in AI features. It suits workshops, laboratories, makerspaces and small R&D teams.
+Maintain inventory manually, or allow external AI agents to inspect and manage inventory, retrieve technical documents and reason about available components. Inventrospect itself does not require an LLM or provide built-in AI features.
+
+## Who is it for?
+
+- Makers
+- Workshops
+- R&D laboratories
+- Makerspaces
+- Universities
+
+## What is it not designed for?
+
+- Retail
+- Purchasing and vendor management
+- Large-scale enterprise deployments
+
+## Capabilities
 
 - Searchable components, categories, locations and structured attributes.
 - Whole-number stock adjustments, movements and history.
@@ -15,11 +31,11 @@ Screenshot placeholder: a current, redacted inventory explorer screenshot will b
 
 ## Docker quick start
 
-Install Docker Engine with the Compose plugin. Go is not required. From a checkout of this repository:
+Install Docker Engine with the Compose plugin. The quick start pulls the published image from GHCR; Go and local compilation are not required. From a checkout of this repository (or a directory containing `compose.yaml` and `.env.example`):
 
 ```bash
 cp .env.example .env
-docker compose build app
+docker compose pull app mcp backup
 # One-time administrator setup (Bash; choose a 12–72-byte password).
 read -rsp 'Initial admin password: ' password; echo
 printf '%s\n' "$password" | docker compose run -T --rm --no-deps app \
@@ -28,7 +44,7 @@ unset password
 docker compose up -d
 ```
 
-Open http://127.0.0.1:8080 and sign in as `admin`. Both published ports bind only to loopback. Subsequent starts need only `docker compose up -d`. Administrator setup is deliberately explicit: there is no default password.
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080) and sign in as `admin`. Both published ports bind only to loopback. Subsequent starts need only `docker compose up -d`. Administrator setup is deliberately explicit: there is no default password.
 
 The application and MCP adapter run in separate containers using one non-root image. MCP accesses inventory through REST and never mounts the database. The named `data` volume retains SQLite, users, token hashes, sessions and uploaded documents across container replacement. **Do not run `docker compose down -v` against a real installation.**
 
@@ -42,9 +58,11 @@ Read-only clients generally need `inventory:read`, `stock:read` and `documents:r
 
 Use the supported offline archive commands to back up SQLite and all attachments together. Stop both services first; copying a live `.db` file alone is unsafe. See [deployment, backup/restore and upgrade instructions](docs/deployment.md), including HTTPS reverse proxy configuration, bind mounts and orphan reconciliation.
 
-Images and binaries are produced by the [tagged release workflow](docs/releases.md). Until a release has actually been published, use the source-build quick start above.
+Images and binaries are produced by the [tagged release workflow](docs/releases.md). The quick start uses `ghcr.io/sigmatechnica/inventrospect:latest`. For predictable upgrades, set `INVENTROSPECT_IMAGE` in `.env` to a specific published version tag or digest and follow the backup-before-upgrade procedure.
 
 ## Development
+
+To build and run containers from a source checkout, see [local container builds](docs/development.md).
 
 Use Go 1.27.2 as selected by `go.mod`; Node 24 runs the dependency-free UI tests.
 
@@ -59,6 +77,10 @@ go build -o bin/inventrospect-ops ./cmd/ops
 ```
 
 The application embeds its HTML/CSS/JavaScript. There is no frontend package installation. See [contributing](CONTRIBUTING.md) and the retained [API/development reference](docs/api-and-development.md).
+
+## AI
+
+Inventrospect is built with Codex and Claude.
 
 ## Security and licence
 

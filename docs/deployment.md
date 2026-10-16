@@ -66,12 +66,12 @@ docker compose -p inventrospect-restored run -T --rm backup restore -archive=- <
 docker compose -p inventrospect-restored up -d
 ```
 
-Stop the previous installation before starting the restored one on the same ports. Source builds require `docker compose build app` first. Verify login, inventory and document downloads after restore. Restore checks archive hashes, SQLite integrity/foreign keys, and each referenced document's length/checksum. It refuses any nonempty destination (except the lock file) and never merges databases. Interrupted restore markers/staging directories prevent application startup: preserve the failed directory for diagnosis, then retry into another fresh project/volume. Do not delete the original installation until the restored data has been checked. A corrupt archive is rejected before publishing its files.
+Stop the previous installation before starting the restored one on the same ports. Source builds require the [local build override](development.md) and `docker compose build app` first. Verify login, inventory and document downloads after restore. Restore checks archive hashes, SQLite integrity/foreign keys, and each referenced document's length/checksum. It refuses any nonempty destination (except the lock file) and never merges databases. Interrupted restore markers/staging directories prevent application startup: preserve the failed directory for diagnosis, then retry into another fresh project/volume. Do not delete the original installation until the restored data has been checked. A corrupt archive is rejected before publishing its files.
 
 ## Upgrade and downgrade
 
 1. Back up with the **currently running release's** maintenance image, using the stopped procedure above; verify and retain the archive off-host.
-2. Record the previous version and configuration. Pin the new published `INVENTROSPECT_IMAGE` tag in `.env`, then `docker compose pull app mcp backup`. For source deployments update the checkout and run `docker compose build app` instead.
+2. Record the previous version and configuration. Pin the new published `INVENTROSPECT_IMAGE` tag in `.env`, then `docker compose pull app mcp backup`. For source deployments, keep the [local build override](development.md) enabled, update the checkout and run `docker compose build app` instead.
 3. `docker compose up -d`; check health and `docker compose logs app mcp`. Startup logs report version, migrations and listening endpoints.
 4. Check login, representative inventory and document retrieval.
 
