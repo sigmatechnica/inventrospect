@@ -27,7 +27,7 @@ Maintain inventory manually, or allow external AI agents to inspect and manage i
 - SQLite and local document storage; no external database or cloud services.
 - Light/dark themes and an inventory explorer.
 
-Screenshot placeholder: a current, redacted inventory explorer screenshot will be added before release. No screenshots are included yet.
+![Inventrospect inventory explorer showing components and stock levels](docs/images/screenshot.png)
 
 ## Docker quick start
 
