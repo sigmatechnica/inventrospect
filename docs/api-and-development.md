@@ -8,11 +8,11 @@ file storage. No frontend build step or external service is required at runtime.
 
 ## Build and run
 
-Prerequisite: **Go 1.27.2 or newer**. The minimum patch version is enforced by
+Prerequisite: **Go 1.27.3 or newer**. The minimum patch version is enforced by
 `go.mod`; an older compiler fails rather than silently building. With Go's
 `GOTOOLCHAIN=auto`, the required toolchain is downloaded automatically. If your
 host sets `GOTOOLCHAIN=local`, install the required release or explicitly set
-`GOTOOLCHAIN=go1.27.2` for development commands. Dependencies are fetched on the
+`GOTOOLCHAIN=go1.27.3` for development commands. Dependencies are fetched on the
 first build. Release availability was verified against the [official downloads](https://go.dev/dl/).
 The pure-Go SQLite driver requires no C compiler or separately installed SQLite.
 

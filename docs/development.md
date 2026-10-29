@@ -9,7 +9,7 @@ From the repository root, in Bash:
 ```bash
 export COMPOSE_FILE=compose.yaml:compose.build.yaml
 export INVENTROSPECT_IMAGE=inventrospect:local
-docker compose build app
+docker compose build --pull app
 ```
 
 These environment variables override the published-image setting in `.env`.
@@ -25,9 +25,15 @@ untracked `.env` file instead.
 After source changes, back up existing data before rebuilding and restarting:
 
 ```bash
-docker compose build app
+docker compose build --pull app
 docker compose up -d
 ```
+
+`--pull` refreshes the base images, including the runtime CA bundle. Keep the Go
+version in `go.mod` and the Dockerfile build stage updated together. Go security
+fixes require rebuilding and replacing the application binaries; updating the
+host compiler alone does not patch existing containers. Go 1.27.3 is the minimum
+for the eMudhra certificate distrust fix (CVE-2026-111943).
 
 To test the local image with disposable data:
 
